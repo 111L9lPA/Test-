@@ -62,6 +62,10 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
 .pad{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
 .pad .btn{padding:6px 10px}
 .card button:disabled{opacity:.35;cursor:default}
+.kids{margin:8px 0 0 6px;padding-left:8px;border-left:3px solid var(--line)}
+.card.kid{margin-bottom:6px;background:#fafbfc}
+.ssel{outline:2px solid var(--acc)}
+.wl .mvr{margin:0 0 2px}
 @media(max-width:820px){
   #app{flex-direction:column-reverse}
   #panel{width:auto;height:42vh;border-right:0;border-top:1px solid var(--line)}
@@ -79,7 +83,7 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
   <label class="btn pri" for="fi">Загрузить .nc</label>
   <input id="fi" type="file" multiple hidden>
   <button class="btn" id="bFit">Вписать лист</button>
-  <button class="btn on" id="bRap">Холостые</button>
+  <button class="btn on" id="bRap" title="Пунктирные линии: где фреза переезжает над листом без резки (команда G0, «холостой ход»)">Переезды без реза</button>
   <button class="btn" id="bMove">Двигать</button>
   <button class="btn" id="bScrew">Шуруп</button>
   <button class="btn" id="bRuler">Линейка</button>
@@ -109,7 +113,7 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
     <div class="acts"><button class="btn sm" id="bCopy">Копировать отчёт для нейросети</button><button class="btn sm" id="bSave">Скачать .txt</button></div>
     <details id="logd"><summary>Подробности <span id="logc"></span></summary><div id="log"></div></details>
     <h2>Легенда</h2>
-    <div class="hint">● зелёная точка — старт программы (первый рез), ■ чёрный квадрат — финиш. Широкая полупрозрачная полоса — ширина реза. Тонкий пунктир — холостые ходы. Красное — ошибки раскроя.</div>
+    <div class="hint">● зелёная точка — старт программы (первый рез), ■ чёрный квадрат — финиш. Широкая полупрозрачная полоса — ширина реза. Тонкий пунктир — переезды фрезы без реза (холостые ходы G0). Красное — ошибки раскроя.</div>
   </aside>
   <section id="stage">
     <canvas id="cv"></canvas>
@@ -126,7 +130,7 @@ const $=s=>document.querySelector(s);
 const COLORS=['#1a73e8','#188038','#e37400','#9334e6','#00838f','#c2185b','#6d4c41','#5f6b00'];
 const GAP=3;                       // минимальный зазор между деталями, мм
 const state={files:[],sheet:{w:0,h:0,auto:true,note:''},toolD:3.86,rapid:true,grid:true,
-  view:{s:1,ox:0,oy:0},moved:false,sel:null,screws:[],screwMode:false,screwD:8,hover:null,warns:[],conf:[],nid:1,moveMode:false,ruler:false,rpts:[],step:1,margin:10};
+  view:{s:1,ox:0,oy:0},moved:false,sel:null,screws:[],screwMode:false,screwD:8,hover:null,warns:[],conf:[],nid:1,moveMode:false,ruler:false,rpts:[],step:1,margin:10,scr:{z:-3,f:600,safe:5},scrTpl:null,selScrew:-1,moveSolo:false,snap:null};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>{const r=Math.round(n*100)/100;return Object.is(r,-0)?'0':String(r)};
 const hexA=(h,a)=>{const n=parseInt(h.slice(1),16);return `rgba(${n>>16},${n>>8&255},${n&255},${a})`};
@@ -325,6 +329,12 @@ function analyze(f){
   f.start=c0?[c0.segs[0].x0+ox,c0.segs[0].y0+oy]:f.drills.length?[f.drills[0].x,f.drills[0].y]:null;
   f.end=c1?[c1.segs[c1.segs.length-1].x1+ox,c1.segs[c1.segs.length-1].y1+oy]:dl?[dl.x,dl.y]:null;
   f.type=f.parts.some(p=>p.kind==='part')?(f.drills.length?'mixed':'contour'):f.drills.length?(f.uniq.length?'mixed':'drill'):'other';
+  f.snapPts=[];f.snapSegs=[];
+  for(const pt of f.parts){
+    const q=pt.poly.filter((v,i)=>{const n=pt.poly[(i+1)%pt.poly.length];return Math.hypot(v[0]-n[0],v[1]-n[1])>1e-4}),n=q.length;if(n<3)continue;
+    for(let i=0;i<n;i++){const a=q[(i+n-1)%n],b=q[i],c=q[(i+1)%n],a1=Math.atan2(b[1]-a[1],b[0]-a[0]),a2=Math.atan2(c[1]-b[1],c[0]-b[0]);let d=Math.abs(a2-a1);if(d>Math.PI)d=2*Math.PI-d;if(d>0.45)f.snapPts.push(b)}
+    if(n<4000)for(let i=0;i<n;i++)f.snapSegs.push([q[i],q[(i+1)%n]]);
+  }
   const rp=new Path2D();for(const q of P.rapids){rp.moveTo(q[0]+ox,q[1]+oy);rp.lineTo(q[2]+ox,q[3]+oy)}f.rapidPath=rp;
 }
 const TYPES={contour:'Контур',drill:'Присадка',mixed:'Контур + присадка',other:'Рез / паз'};
@@ -507,14 +517,20 @@ function draw(ctx,W,H,v,o){
   // шурупы
   state.screws.forEach((m,i)=>{
     const col={ok:'#188038',part:'#e37400',cut:'#e00000',edge:'#e37400'}[m.v]||'#555',r=Math.max(state.screwD/2*s,5*K);
-    ctx.fillStyle=hexA(col,.25);ctx.strokeStyle=col;ctx.lineWidth=2*K;ctx.beginPath();ctx.arc(X(m.x),Y(m.y),r,0,7);ctx.fill();ctx.stroke();
+    ctx.fillStyle=hexA(col,.25);ctx.strokeStyle=col;ctx.lineWidth=(state.selScrew===i?4:2)*K;ctx.beginPath();ctx.arc(X(m.x),Y(m.y),r,0,7);ctx.fill();ctx.stroke();
     ctx.beginPath();ctx.moveTo(X(m.x)-r*.6,Y(m.y));ctx.lineTo(X(m.x)+r*.6,Y(m.y));ctx.moveTo(X(m.x),Y(m.y)-r*.6);ctx.lineTo(X(m.x),Y(m.y)+r*.6);ctx.stroke();
     ctx.font=`bold ${11*K}px system-ui,sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom';halo(ctx,'Ш'+(i+1),X(m.x)+r+2*K,Y(m.y)-2*K,col)});
-  if(!o.export&&state.rpts.length){
+  if(!o.export&&(state.rpts.length||(state.ruler&&state.snap))){
     ctx.strokeStyle='#7a1fa2';ctx.fillStyle='#7a1fa2';ctx.lineWidth=2;
-    state.rpts.forEach(q=>{ctx.beginPath();ctx.arc(X(q.x),Y(q.y),4,0,7);ctx.fill()});
-    if(state.rpts.length===2){const[a,b]=state.rpts;ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();
-      const t=`${fmt(Math.hypot(b.x-a.x,b.y-a.y))} мм  (ΔX ${fmt(b.x-a.x)}, ΔY ${fmt(b.y-a.y)})`;ctx.font='bold 12px system-ui,sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';halo(ctx,t,(X(a.x)+X(b.x))/2,(Y(a.y)+Y(b.y))/2-6,'#7a1fa2')}
+    state.rpts.forEach(q=>{ctx.beginPath();if(q.k==='v')ctx.rect(X(q.x)-5,Y(q.y)-5,10,10);else ctx.arc(X(q.x),Y(q.y),4,0,7);ctx.fill()});
+    if(state.rpts.length===2){const[a,b]=state.rpts;
+      ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();
+      ctx.setLineDash([4,4]);ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();ctx.setLineDash([]);
+      ctx.font='bold 12px system-ui,sans-serif';ctx.textBaseline='bottom';ctx.textAlign='center';
+      if(Math.abs(b.x-a.x)>0.05)halo(ctx,fmt(Math.abs(b.x-a.x)),(X(a.x)+X(b.x))/2,Y(a.y)-3,'#7a1fa2');
+      ctx.textAlign='left';if(Math.abs(b.y-a.y)>0.05)halo(ctx,fmt(Math.abs(b.y-a.y)),X(b.x)+5,(Y(a.y)+Y(b.y))/2,'#7a1fa2');
+      const t=`${fmt(Math.hypot(b.x-a.x,b.y-a.y))} мм  (ΔX ${fmt(b.x-a.x)}, ΔY ${fmt(b.y-a.y)})`;ctx.textAlign='center';halo(ctx,t,(X(a.x)+X(b.x))/2,(Y(a.y)+Y(b.y))/2-8,'#7a1fa2')}
+    if(state.ruler&&state.snap){const q=state.snap;ctx.lineWidth=2;ctx.beginPath();if(q.k==='v')ctx.rect(X(q.x)-7,Y(q.y)-7,14,14);else ctx.arc(X(q.x),Y(q.y),5,0,7);ctx.stroke()}
   }
   if(!o.export&&state.hover){const h=state.hover;ctx.strokeStyle='rgba(0,0,0,.5)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(h.x)-7,Y(h.y));ctx.lineTo(X(h.x)+7,Y(h.y));ctx.moveTo(X(h.x),Y(h.y)-7);ctx.lineTo(X(h.x),Y(h.y)+7);ctx.stroke()}
   if(o.export){ // легенда
@@ -534,22 +550,24 @@ function zoomAt(px,py,f){const v=state.view,ns=Math.max(0.02,Math.min(500,v.s*f)
   v.ox=px-wx*ns;v.oy=py+wy*ns;v.s=ns;state.moved=true;redraw()}
 const toWorld=(px,py)=>({x:(px-state.view.ox)/state.view.s,y:(state.view.oy-py)/state.view.s});
 function setHover(px,py){
-  const p=toWorld(px,py);state.hover=p;const sh=state.sheet;let t=`X ${p.x.toFixed(1)}  Y ${p.y.toFixed(1)} мм`;
+  const p=toWorld(px,py);state.hover=p;state.snap=state.ruler?findSnap(p):null;const sh=state.sheet;let t=`X ${p.x.toFixed(1)}  Y ${p.y.toFixed(1)} мм`;
   if(sh.w&&(p.x<0||p.y<0||p.x>sh.w||p.y>sh.h))t+='  (вне листа)';
   for(const f of state.files){if(!f.visible)continue;for(const pt of f.parts)if(pt.kind==='part'&&inPoly([p.x,p.y],pt.poly)){t+='  · '+f.name+' '+fmt(pt.w)+' x '+fmt(pt.h)}}
   $('#status').textContent=t;redraw()}
 const ptrs=new Map();let tapInfo=null,pinch=null;
 const rel=e=>{const r=cv.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}};
 cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,rel(e));
-  if(ptrs.size===1)tapInfo={...rel(e),moved:false,ax:0,ay:0};else{tapInfo&&(tapInfo.moved=true);const[a,b]=[...ptrs.values()];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),mx:(a.x+b.x)/2,my:(a.y+b.y)/2}}});
+  if(ptrs.size===1)tapInfo=newTap(e);else{tapInfo&&(tapInfo.moved=true);const[a,b]=[...ptrs.values()];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),mx:(a.x+b.x)/2,my:(a.y+b.y)/2}}});
 cv.addEventListener('pointermove',e=>{
   const p=rel(e);if(!ptrs.has(e.pointerId)){if(e.pointerType==='mouse')setHover(p.x,p.y);return}
   const old=ptrs.get(e.pointerId);ptrs.set(e.pointerId,p);
   if(ptrs.size===1){
     if(tapInfo&&!tapInfo.moved&&Math.hypot(p.x-tapInfo.x,p.y-tapInfo.y)>5)tapInfo.moved=true;
     if(tapInfo&&tapInfo.moved){
-      const sf=state.moveMode&&state.files.find(f=>f.id===state.sel&&f.visible);
-      if(sf){tapInfo.ax+=(p.x-old.x)/state.view.s;tapInfo.ay-=(p.y-old.y)/state.view.s;
+      const sf=!tapInfo.pan&&tapInfo.si<0&&state.moveMode&&state.files.find(f=>f.id===state.sel&&f.visible);
+      if(!tapInfo.pan&&tapInfo.si>=0){const w=toWorld(p.x,p.y),m=state.screws[tapInfo.si];
+        if(m){m.x=Math.round(w.x*10)/10;m.y=Math.round(w.y*10)/10;tapInfo.dragged=true;state.selScrew=tapInfo.si;recomputeScrews();redraw()}}
+      else if(sf){tapInfo.ax+=(p.x-old.x)/state.view.s;tapInfo.ay-=(p.y-old.y)/state.view.s;
         const dx=Math.round(tapInfo.ax/0.1)*0.1,dy=Math.round(tapInfo.ay/0.1)*0.1;
         if(dx||dy){tapInfo.ax-=dx;tapInfo.ay-=dy;tapInfo.dragged=true;moveGroup(sf,dx,dy,true)}}
       else{state.view.ox+=p.x-old.x;state.view.oy+=p.y-old.y;state.moved=true;redraw()}}
@@ -558,12 +576,27 @@ cv.addEventListener('pointermove',e=>{
     const[a,b]=[...ptrs.values()],d=Math.hypot(a.x-b.x,a.y-b.y),mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
     state.view.ox+=mx-pinch.mx;state.view.oy+=my-pinch.my;if(pinch.d>0)zoomAt(mx,my,d/pinch.d);pinch={d,mx,my}}});
 const endPtr=e=>{const was=ptrs.size;ptrs.delete(e.pointerId);
-  if(e.type==='pointerup'&&was===1&&tapInfo&&!tapInfo.moved)onTap(tapInfo.x,tapInfo.y);
+  if(e.type==='pointerup'&&was===1&&tapInfo&&!tapInfo.moved){if(tapInfo.si>=0){state.selScrew=tapInfo.si;renderPanel();redraw()}else onTap(tapInfo.x,tapInfo.y)}
   else if(was===1&&tapInfo&&tapInfo.dragged){renderPanel();saveSoon()}
   if(ptrs.size<2)pinch=null;if(ptrs.size===0)tapInfo=null;else if(tapInfo)tapInfo.moved=true};
 cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);
-cv.addEventListener('pointerleave',e=>{if(e.pointerType==='mouse'){state.hover=null;$('#status').textContent='X — Y — мм';redraw()}});
+cv.addEventListener('pointerleave',e=>{if(e.pointerType==='mouse'){state.hover=null;state.snap=null;$('#status').textContent='X — Y — мм';redraw()}});
 cv.addEventListener('wheel',e=>{e.preventDefault();const p=rel(e);zoomAt(p.x,p.y,Math.exp(-e.deltaY*(e.ctrlKey?0.01:0.0015)))},{passive:false});
+function newTap(e){const q=rel(e);
+  return{...q,moved:false,ax:0,ay:0,pan:e.pointerType==='mouse'&&e.button!==0,si:(state.screwMode&&!state.ruler)?screwAt(q.x,q.y):-1}}
+function screwAt(px,py){const s=state.view.s;let b=-1,bd=1e9;
+  state.screws.forEach((m,i)=>{const d=Math.hypot(state.view.ox+m.x*s-px,state.view.oy-m.y*s-py);if(d<Math.max(state.screwD/2*s,16)&&d<bd){bd=d;b=i}});return b}
+function findSnap(p){
+  const s=state.view.s,sh=state.sheet;let best=null,bd=13/s;
+  const tryV=(x,y)=>{const d=Math.hypot(x-p.x,y-p.y);if(d<bd){bd=d;best={x,y,k:'v'}}};
+  if(sh.w){tryV(0,0);tryV(sh.w,0);tryV(0,sh.h);tryV(sh.w,sh.h)}
+  for(const f of state.files){if(!f.visible)continue;for(const c of f.snapPts)tryV(c[0],c[1]);for(const d of f.drills)tryV(d.x,d.y)}
+  for(const m of state.screws)tryV(m.x,m.y);
+  if(best)return best;
+  let ed=9/s;const tryE=(a,b)=>{const r=ptSeg([p.x,p.y],a,b);if(r.d<ed){ed=r.d;best={x:r.q[0],y:r.q[1],k:'e'}}};
+  if(sh.w){const c=[[0,0],[sh.w,0],[sh.w,sh.h],[0,sh.h]];for(let i=0;i<4;i++)tryE(c[i],c[(i+1)%4])}
+  for(const f of state.files){if(!f.visible)continue;for(const sg of f.snapSegs)tryE(sg[0],sg[1])}
+  return best}
 function hitFile(p){
   for(let i=state.files.length-1;i>=0;i--){const f=state.files[i];if(!f.visible)continue;
     if(f.parts.some(q=>q.kind==='part'&&inPoly([p.x,p.y],q.poly)))return f;
@@ -571,24 +604,18 @@ function hitFile(p){
   return null}
 function onTap(px,py){
   setHover(px,py);const p=state.hover;
-  if(state.ruler){if(state.rpts.length>=2)state.rpts=[];state.rpts.push({x:p.x,y:p.y});redraw();return}
+  if(state.ruler){if(state.rpts.length>=2)state.rpts=[];const q=state.snap||p;state.rpts.push({x:q.x,y:q.y,k:q.k});redraw();return}
   if(!state.screwMode){const hit=hitFile(p);if(hit&&state.sel!==hit.id){state.sel=hit.id;renderPanel();redraw()}return}
   if(state.screwMode){
     const near=state.screws.findIndex(m=>Math.hypot(m.x-p.x,m.y-p.y)*state.view.s<Math.max(state.screwD/2*state.view.s,14));
-    if(near>=0)state.screws.splice(near,1);else state.screws.push({x:p.x,y:p.y});
+    if(near>=0)state.selScrew=near;else{state.screws.push({x:Math.round(p.x*10)/10,y:Math.round(p.y*10)/10});state.selScrew=state.screws.length-1}
     recomputeScrews();renderPanel();redraw()}}
 
 /* ====================== панель ====================== */
-function renderPanel(){
-  const ae=document.activeElement,fk=ae&&ae.dataset&&ae.dataset.act&&ae.closest&&ae.closest('#files .card')?{id:ae.closest('.card').dataset.id,act:ae.dataset.act}:null;
-  $('#fcnt').textContent=state.files.length?'('+state.files.length+')':'';
-  $('#filesHint').style.display=state.files.length?'none':'';
-  $('#empty').style.display=state.files.length?'none':'';
-  const sh=state.sheet;
-  $('#files').innerHTML=state.files.map((f,i)=>{
-    const e=f.ext,errs=f.raw.log.filter(l=>l.lvl==='error').length,wr=f.raw.log.filter(l=>l.lvl==='warn').length;
-    const pb=f.partBB,sel=state.sel===f.id,mates=state.files.filter(x=>x.gid===f.gid&&x!==f),moved=f.off.x||f.off.y;
-    let h=`<div class="card${sel?' sel':''}" data-id="${f.id}" style="border-left-color:${f.color}">
+function cardHtml(f,kids,nested){
+  const sh=state.sheet,i=state.files.indexOf(f),e=f.ext,errs=f.raw.log.filter(l=>l.lvl==='error').length,wr=f.raw.log.filter(l=>l.lvl==='warn').length;
+  const pb=f.partBB,sel=state.sel===f.id,mates=state.files.filter(x=>x.gid===f.gid&&x!==f),moved=f.off.x||f.off.y,full=!nested||sel;
+  let h=`<div class="card${sel?' sel':''}${nested?' kid':''}" data-id="${f.id}" style="border-left-color:${f.color}">
 <div class="row"><span class="num">${i+1}</span><b class="nm" title="${esc(f.name)}">${esc(f.name)}</b>
 <button class="x" data-act="up" title="Выше — раньше на станке" ${i?'':'disabled'}>▲</button><button class="x" data-act="down" title="Ниже — позже на станке" ${i<state.files.length-1?'':'disabled'}>▼</button>
 <input type="checkbox" data-act="vis" ${f.visible?'checked':''} title="Показать / скрыть">
@@ -597,33 +624,61 @@ function renderPanel(){
 ${pb?`<div class="kv"><i>Деталь:</i> <b>${fmt(pb.x1-pb.x0)} x ${fmt(pb.y1-pb.y0)}</b> мм${f.parts.some(p=>p.kind==='hole')?' <i>(+вырезы)</i>':''}</div>`:''}
 ${f.drills.length?`<div class="kv"><i>Отверстий:</i> <b>${f.drills.length}</b></div>`:''}
 <div class="kv"><i>Глубина:</i> Z ${f.depth==null?'—':fmt(f.depth)}${f.uniq.length?` · <i>проходов:</i> ${f.passes} · <i>контуров:</i> ${f.uniq.length}`:''}${f.raw.cutTime>0?` · ≈${f.raw.cutTime<1?'<1':f.raw.cutTime.toFixed(1)} мин реза`:''}</div>
-${e?`<div class="kv"><i>X:</i> ${fmt(e.x0)} … ${fmt(e.x1)} · <i>Y:</i> ${fmt(e.y0)} … ${fmt(e.y1)}</div>
+${full&&e?`<div class="kv"><i>X:</i> ${fmt(e.x0)} … ${fmt(e.x1)} · <i>Y:</i> ${fmt(e.y0)} … ${fmt(e.y1)}</div>
 <div class="kv"><i>Отступы от листа:</i> ← ${fmt(e.x0)} · → ${sh.w?fmt(sh.w-e.x1):'?'} · ↓ ${fmt(e.y0)} · ↑ ${sh.h?fmt(sh.h-e.y1):'?'}</div>`:''}
-${f.start?`<div class="kv"><i>Старт:</i> ${fmt(f.start[0])}, ${fmt(f.start[1])} · <i>финиш:</i> ${fmt(f.end[0])}, ${fmt(f.end[1])}</div>`:''}
+${full&&f.start?`<div class="kv"><i>Старт:</i> ${fmt(f.start[0])}, ${fmt(f.start[1])} · <i>финиш:</i> ${fmt(f.end[0])}, ${fmt(f.end[1])}</div>`:''}
 ${moved?`<div class="kv"><i>Сдвиг от файла:</i> <b>X ${f.off.x>=0?'+':''}${fmt(f.off.x)}, Y ${f.off.y>=0?'+':''}${fmt(f.off.y)}</b></div>`:''}
-${mates.length?`<div class="kv"><i>Двигается вместе с:</i> ${mates.map(m=>esc(m.name)).join(', ')}</div>`:''}
-<div class="kv"><i>Инструмент:</i> ${f.raw.tools.length?f.raw.tools.map(t=>'T'+t.n).join(', '):'не указан'}${f.raw.tools.length>1?' <span class="badge w">несколько фрез</span>':''}</div>
+${full?`<div class="kv"><i>Инструмент:</i> ${f.raw.tools.length?f.raw.tools.map(t=>'T'+t.n).join(', '):'не указан'}${f.raw.tools.length>1?' <span class="badge w">несколько фрез</span>':''}</div>`:''}
 ${errs||wr?`<div class="kv">${errs?`<span class="badge e">ошибок: ${errs}</span>`:''}${wr?`<span class="badge w">замечаний: ${wr}</span>`:''}</div>`:''}`;
-    if(sel){
-      const others=state.files.filter(x=>x!==f);
-      h+=`<div class="mv">
+  if(kids.length){
+    h+=`<div class="kids"><div class="kv"><b>Присадка этой детали: ${kids.length} ${kids.length===1?'файл':'файла(ов)'}</b> <button class="btn sm" data-act="fold">${f.fold?'развернуть ▸':'свернуть ▾'}</button></div>`;
+    if(!f.fold)h+=kids.map(k=>cardHtml(k,[],true)).join('');
+    h+='</div>';
+  }
+  if(sel){
+    const others=state.files.filter(x=>x!==f);
+    h+=`<div class="mv">
 <div class="mvr"><span>Сдвиг X</span><input type="number" step="0.1" data-act="ox" value="${fmt(f.off.x)}"><span>Y</span><input type="number" step="0.1" data-act="oy" value="${fmt(f.off.y)}"></div>
 <div class="pad"><button class="btn" data-act="nudge" data-dx="-1" data-dy="0" title="влево">◀</button><button class="btn" data-act="nudge" data-dx="0" data-dy="1" title="вверх">▲</button><button class="btn" data-act="nudge" data-dx="0" data-dy="-1" title="вниз">▼</button><button class="btn" data-act="nudge" data-dx="1" data-dy="0" title="вправо">▶</button>
 <select data-act="step">${[0.1,1,10,100].map(v=>`<option${v===state.step?' selected':''}>${v}</option>`).join('')}</select><span class="hint">шаг, мм</span></div>
 <div class="mvr"><span>Отступ от края</span><input type="number" min="0" data-act="mg" value="${state.margin}"><span class="hint">мм</span></div>
 <div class="pad"><button class="btn sm" data-act="al" data-s="l">⇤ влево</button><button class="btn sm" data-act="al" data-s="r">вправо ⇥</button><button class="btn sm" data-act="al" data-s="b">↧ вниз</button><button class="btn sm" data-act="al" data-s="t">↥ вверх</button><button class="btn sm" data-act="al" data-s="c">по центру</button></div>
-${others.length?`<div class="mvr"><span>Двигать вместе с</span><select data-act="link"><option value="">— ни с кем</option>${others.map(o=>`<option value="${o.id}"${mates.includes(o)?' selected':''}>${esc(o.name)}</option>`).join('')}</select></div>`:''}
+${others.length?`<div class="kv" style="margin-top:8px"><b>Двигаются вместе с этим файлом:</b></div>
+${others.map(o=>`<label class="kv" style="display:block"><input type="checkbox" data-act="mate" data-oid="${o.id}" ${mates.includes(o)?'checked':''}> ${esc(o.name)} <i>(${TYPES[o.type]})</i></label>`).join('')}
+<div class="pad"><button class="btn sm" data-act="alld">Все присадки → к этому</button><button class="btn sm" data-act="unlinkall">Отвязать всех</button></div>`:''}
+<label class="kv" style="display:block"><input type="checkbox" data-act="solo" ${state.moveSolo?'checked':''}> Двигать только этот файл (без связки)</label>
 <div class="mvr"><span>Цвет</span><input type="color" data-act="color" value="${f.color}" style="width:40px;padding:0"></div>
 <div class="pad"><button class="btn pri sm" data-act="export" ${moved?'':'disabled'}>Сохранить сдвинутый .nc</button><button class="btn sm" data-act="reset" ${moved?'':'disabled'}>Сбросить сдвиг</button></div>
 </div>`;
-    }
-    return h+'</div>'}).join('');
+  }
+  return h+'</div>'}
+function groupsHtml(){
+  const seen=new Set(),out=[];
+  for(const f of state.files){if(seen.has(f.gid))continue;seen.add(f.gid);
+    const m=state.files.filter(x=>x.gid===f.gid),par=m.find(x=>x.type!=='drill')||m[0];
+    out.push(cardHtml(par,m.filter(x=>x!==par),false))}
+  return out.join('')}
+function renderPanel(){
+  const ae=document.activeElement,fk=ae&&ae.dataset&&ae.dataset.act&&ae.closest&&ae.closest('#files .card')?{id:ae.closest('.card').dataset.id,act:ae.dataset.act}:null;
+  const fs=ae&&ae.dataset&&ae.dataset.sact?{act:ae.dataset.sact,i:(ae.closest('[data-si]')||{dataset:{}}).dataset.si}:null;
+  $('#fcnt').textContent=state.files.length?'('+state.files.length+')':'';
+  $('#filesHint').style.display=state.files.length?'none':'';
+  $('#empty').style.display=state.files.length?'none':'';
+  const sh=state.sheet;
+  $('#files').innerHTML=groupsHtml();
   if(fk){const el=document.querySelector(`#files .card[data-id="${fk.id}"] [data-act="${fk.act}"]`);if(el&&/INPUT|SELECT/.test(el.tagName)){el.focus();try{el.select()}catch(e){}}}
   $('#warns').innerHTML=state.warns.length?state.warns.map(w=>`<div class="wl ${w.l}">${esc(w.t)}</div>`).join(''):(state.files.length?'<div class="ok">Проблем с раскроем не найдено ✓</div>':'<div class="hint">Пока нет данных.</div>');
   $('#sheetNote').textContent=sh.w?`Сейчас: лист ${fmt(sh.w)} × ${fmt(sh.h)} мм${sh.auto?' (авто)':' (вручную)'}`:'';
-  $('#screws').innerHTML=state.screws.length?'<h2>Шурупы</h2>'+state.screws.map((m,i)=>{
-    const t={ok:['i','в отходе — безопасно'],part:['w','внутри детали — останется отверстие'],cut:['e','на линии реза — фреза заденет!'],edge:['w','у самого края листа']}[m.v]||['i',''];
-    return `<div class="wl ${t[0]}">Ш${i+1} (${fmt(m.x)}, ${fmt(m.y)}): ${t[1]}${isFinite(m.d)&&m.d<1e17?' · до траектории '+fmt(m.d)+' мм':''}</div>`}).join(''):'';
+  const VERD={ok:['i','в отходе — безопасно'],part:['w','внутри детали — останется отверстие'],cut:['e','на линии реза — фреза заденет!'],edge:['w','у самого края листа']};
+  const tplId=state.scrTpl==null?(state.files[0]&&state.files[0].id):state.scrTpl;
+  $('#screws').innerHTML=state.screws.length?`<h2>Шурупы (${state.screws.length})</h2><div class="hint">Режим «Шуруп»: нажмите на лист — новый шуруп; перетащите шуруп — подвинуть; Delete — удалить выбранный.</div>`+state.screws.map((m,i)=>{const t=VERD[m.v]||['i',''];
+    return `<div class="wl ${t[0]}${state.selScrew===i?' ssel':''}" data-si="${i}"><div class="mvr"><b>Ш${i+1}</b> X<input type="number" step="0.1" data-sact="sx" value="${fmt(m.x)}"> Y<input type="number" step="0.1" data-sact="sy" value="${fmt(m.y)}"><button class="x" data-sact="sdel" title="Удалить шуруп">✕</button></div><div>${t[1]}${isFinite(m.d)&&m.d<1e17?' · до траектории '+fmt(m.d)+' мм':''}</div></div>`}).join('')+`
+<div class="mvr"><span>Глубина Z</span><input type="number" step="0.1" data-sact="z" value="${state.scr.z}"><span>F</span><input type="number" data-sact="f" value="${state.scr.f}"></div>
+<div class="mvr"><span>Высота переезда Z</span><input type="number" step="0.5" data-sact="safe" value="${state.scr.safe}"></div>
+<div class="mvr"><span>Заголовок и конец программы взять из файла:</span></div>
+<div class="mvr"><select data-sact="tpl" style="width:100%"><option value=""${tplId?'':' selected'}>— стандартный (проверьте!) —</option>${state.files.map(o=>`<option value="${o.id}"${o.id===tplId?' selected':''}>${esc(o.name)}</option>`).join('')}</select></div>
+<div class="pad"><button class="btn pri sm" data-sact="gen">Создать программу шурупов (.nc)</button></div>`:'';
+  if(fs){const el=document.querySelector(fs.i!=null?`#screws [data-si="${fs.i}"] [data-sact="${fs.act}"]`:`#screws [data-sact="${fs.act}"]`);if(el&&/INPUT|SELECT/.test(el.tagName)){el.focus();try{el.select()}catch(e){}}}
   // лог
   const all=[];state.files.forEach(f=>f.raw.log.forEach(l=>all.push({f:f.name,...l})));
   const ne=all.filter(l=>l.lvl==='error').length;
@@ -631,10 +686,11 @@ ${others.length?`<div class="mvr"><span>Двигать вместе с</span><se
   $('#log').innerHTML=all.length?all.slice(0,300).map(l=>`<div class="lg ${l.lvl}">[${esc(l.f)}${l.line?':'+l.line:''}] ${esc(l.msg)}${l.raw?` <code>${esc(l.raw)}</code>`:''}</div>`).join(''):'<div class="hint">Ошибок разбора нет.</div>';
   $('#logd').open=ne>0;
 }
+const membersOf=f=>state.moveSolo?[f]:state.files.filter(x=>x.gid===f.gid);
 function moveGroup(f,dx,dy,lite){
-  for(const x of state.files)if(x.gid===f.gid){x.off.x=Math.round((x.off.x+dx)*1000)/1000;x.off.y=Math.round((x.off.y+dy)*1000)/1000;analyze(x)}
+  for(const x of membersOf(f)){x.off.x=Math.round((x.off.x+dx)*1000)/1000;x.off.y=Math.round((x.off.y+dy)*1000)/1000;analyze(x)}
   if(lite){recomputeWarnings();recomputeScrews();redraw()}else refresh(false)}
-function groupExt(f){let bb=null;for(const x of state.files)if(x.gid===f.gid&&x.ext)bb=bbUnion(bb,x.ext);return bb}
+function groupExt(f){let bb=null;for(const x of membersOf(f))if(x.ext)bb=bbUnion(bb,x.ext);return bb}
 function alignGroup(f,sd){
   const sh=state.sheet,bb=groupExt(f),m=state.margin;if(!bb||!sh.w)return;let dx=0,dy=0;
   if(sd==='l')dx=m-bb.x0;else if(sd==='r')dx=sh.w-m-bb.x1;else if(sd==='b')dy=m-bb.y0;else if(sd==='t')dy=sh.h-m-bb.y1;
@@ -647,10 +703,15 @@ $('#files').addEventListener('click',e=>{
   if(act==='vis'){f.visible=a.checked;refresh(false);return}
   if(act==='del'){state.files=state.files.filter(x=>x!==f);if(state.sel===f.id)state.sel=null;refresh(true);return}
   if(act==='up'||act==='down'){const j=i+(act==='up'?-1:1);if(j>=0&&j<state.files.length){[state.files[i],state.files[j]]=[state.files[j],state.files[i]];refresh(false)}return}
+  if(act==='fold'){f.fold=!f.fold;renderPanel();return}
+  if(act==='mate'){const o=state.files.find(x=>x.id==a.dataset.oid);if(o){o.gid=a.checked?f.gid:state.nid++;refresh(false)}return}
+  if(act==='alld'){state.files.forEach(x=>{if(x!==f&&x.type==='drill')x.gid=f.gid});refresh(false);return}
+  if(act==='unlinkall'){state.files.forEach(x=>{if(x!==f&&x.gid===f.gid)x.gid=state.nid++});refresh(false);return}
+  if(act==='solo'){state.moveSolo=a.checked;return}
   if(act==='nudge'){moveGroup(f,+a.dataset.dx*state.step,+a.dataset.dy*state.step);return}
   if(act==='al'){alignGroup(f,a.dataset.s);return}
   if(act==='export'){exportShifted(f);return}
-  if(act==='reset'){for(const x of state.files)if(x.gid===f.gid){x.off={x:0,y:0};analyze(x)}refresh(false);return}
+  if(act==='reset'){for(const x of membersOf(f)){x.off={x:0,y:0};analyze(x)}refresh(false);return}
   if(e.target.closest('input,select,button,.mv'))return;
   state.sel=state.sel===f.id?null:f.id;renderPanel();redraw()});
 $('#files').addEventListener('change',e=>{
@@ -847,7 +908,7 @@ $('#bPack').onclick=packAll;
 $('#bClear').onclick=()=>{if(!state.files.length||!confirm('Убрать все загруженные файлы и шурупы?'))return;
   state.files=[];state.screws=[];state.sel=null;state.sheet.auto=true;state.rpts=[];try{localStorage.removeItem(LS)}catch(e){}refresh(true)};
 $('#bMove').onclick=e=>{state.moveMode=!state.moveMode;e.currentTarget.classList.toggle('on',state.moveMode);
-  toast(state.moveMode?(state.sel?'Тащите программу пальцем или мышью. Два пальца / колесо — масштаб':'Выберите программу: нажмите на деталь или карточку, потом тащите'):'Перетаскивание листа включено')};
+  toast(state.moveMode?(state.sel?'Тащите программу пальцем или левой кнопкой. Колесо — масштаб, правая или средняя кнопка — двигать вид, два пальца — масштаб и вид':'Выберите программу: нажмите на деталь или карточку, потом тащите'):'Перетаскивание листа включено')};
 $('#bRuler').onclick=e=>{state.ruler=!state.ruler;state.rpts=[];e.currentTarget.classList.toggle('on',state.ruler);
   if(state.ruler){state.screwMode=false;$('#bScrew').classList.remove('on');toast('Линейка: нажмите две точки')}redraw()};
 
@@ -855,19 +916,77 @@ $('#bRuler').onclick=e=>{state.ruler=!state.ruler;state.rpts=[];e.currentTarget.
 const LS='raskroy-v2';let saveT;
 function saveSoon(){clearTimeout(saveT);saveT=setTimeout(saveNow,500)}
 function saveNow(){try{
-  const d={toolD:state.toolD,screwD:state.screwD,screws:state.screws.map(m=>({x:m.x,y:m.y})),sheet:{auto:state.sheet.auto,w:state.sheet.w,h:state.sheet.h},
+  const d={toolD:state.toolD,screwD:state.screwD,scr:state.scr,screws:state.screws.map(m=>({x:m.x,y:m.y})),sheet:{auto:state.sheet.auto,w:state.sheet.w,h:state.sheet.h},
     files:state.files.map(f=>({name:f.name,b64:btoa(bytesToStr(f.bytes)),off:f.off,vis:f.visible,color:f.color,grp:state.files.findIndex(x=>x.gid===f.gid)}))};
   const t=JSON.stringify(d);if(t.length>4e6)return;localStorage.setItem(LS,t)}catch(e){}}
 function restore(){try{
   const t=localStorage.getItem(LS);if(!t)return;const d=JSON.parse(t);
   if(d.toolD>0){state.toolD=d.toolD;$('#tool').value=d.toolD}
   if(d.screwD>0){state.screwD=d.screwD;$('#scD').value=d.screwD}
+  if(d.scr)Object.assign(state.scr,d.scr);
   (d.files||[]).forEach(x=>addBytes(x.name,strToBytes(atob(x.b64)),{off:x.off,color:x.color,vis:x.vis,noLink:true}));
   (d.files||[]).forEach((x,i)=>{if(x.grp>=0&&x.grp<i)state.files[i].gid=state.files[x.grp].gid});
   state.screws=d.screws||[];
   if(d.sheet&&!d.sheet.auto&&d.sheet.w>0){state.sheet.auto=false;state.sheet.w=d.sheet.w;state.sheet.h=d.sheet.h}
   if(state.files.length){refresh(true);toast('Восстановлены файлы прошлой сессии')}
 }catch(e){}}
+
+/* ====================== программа для шурупов ====================== */
+function genScrews(){
+  const sh=state.sheet,sc=state.scr;
+  if(!state.screws.length)return toast('Сначала поставьте шурупы (кнопка «Шуруп»)');
+  if(!sh.w)return toast('Не задан размер листа');
+  if(!(sc.z<0))return alert('Глубина должна быть отрицательной (Z < 0), иначе фреза не коснётся листа.');
+  if(!(sc.f>0))return alert('Подача F должна быть больше нуля.');
+  const bad=state.screws.findIndex(m=>m.x<0||m.y<0||m.x>sh.w||m.y>sh.h);
+  if(bad>=0)return alert('Шуруп Ш'+(bad+1)+' стоит за пределами листа. Файл не создан.');
+  const tpl=state.files.find(f=>f.id===(state.scrTpl==null?(state.files[0]&&state.files[0].id):state.scrTpl));
+  const P4=n=>n.toFixed(4),codeOnly=l=>{let r='';mapCode(l,c=>{r+=c;return c});return r};
+  let head=null,foot=[];
+  if(tpl){
+    const L=bytesToStr(tpl.bytes).split(/\r\n|\r|\n/);let a=-1,b=-1;
+    L.forEach((l,i)=>{if(/[XYZxyz]\s*[+-]?[\d.]/.test(codeOnly(l))){if(a<0)a=i;b=i}});
+    if(a>0){head=L.slice(0,a);foot=L.slice(b+1);
+      while(foot.length&&!foot[foot.length-1].trim())foot.pop();
+      const ti=head.findIndex(l=>l.includes('(')&&!/material\s*size/i.test(l)&&!codeOnly(l).trim());if(ti>=0)head[ti]='(Shurupy)';
+      while(head.length&&!head[head.length-1].trim())head.pop()}}
+  const std=!head;
+  if(std)head=['(Material Size) (X='+sh.w.toFixed(3)+', Y='+sh.h.toFixed(3)+', Z=0.000)','(Shurupy)','G90','G21'];
+  let pts=state.screws.map(m=>[m.x,m.y]),cur=[0,0];const ord=[];
+  while(pts.length){let bi=0,bd=1e18;pts.forEach((q,i)=>{const d=Math.hypot(q[0]-cur[0],q[1]-cur[1]);if(d<bd){bd=d;bi=i}});cur=pts.splice(bi,1)[0];ord.push(cur)}
+  const body=['G0Z'+P4(sc.safe)];
+  for(const q of ord)body.push('G0X'+P4(q[0])+'Y'+P4(q[1]),'G1Z'+P4(sc.z)+'F'+P4(sc.f).replace(/\.?0+$/,''),'G0Z'+P4(sc.safe));
+  const text=[...head,...body,...foot].join('\r\n')+'\r\n',R=parseNC(text),errs=R.log.filter(l=>l.lvl==='error');
+  const fail=m=>alert('Самопроверка не пройдена, файл НЕ создан: '+m);
+  if(errs.length)return fail(errs[0].msg);
+  if(R.chains.length||R.drills.length!==ord.length)return fail('отверстий '+R.drills.length+' вместо '+ord.length);
+  for(const q of ord)if(!R.drills.some(d=>Math.abs(d.x-q[0])<1e-3&&Math.abs(d.y-q[1])<1e-3&&Math.abs(d.z-sc.z)<1e-6))return fail('отверстие X'+fmt(q[0])+' Y'+fmt(q[1])+' не найдено в программе');
+  const warn=state.screws.map((m,i)=>m.v==='cut'?`Ш${i+1} стоит на линии реза`:m.v==='part'?`Ш${i+1} стоит внутри детали`:'').filter(Boolean);
+  const msg=`Программа шурупов: ${ord.length} отв., глубина Z ${fmt(sc.z)}, подача F ${fmt(sc.f)}, переезд на Z ${fmt(sc.safe)}.\nПроверено: все ${ord.length} отверстий на своих местах, фрезерных проходов по XY нет.\n${std?'ЗАГОЛОВОК СТАНДАРТНЫЙ — сверьте со своими программами (шпиндель M3 и т.п.).':'Заголовок и конец взяты из «'+tpl.name+'».'}\nТочки: ${ord.map(q=>'('+fmt(q[0])+'; '+fmt(q[1])+')').join(' ')}${warn.length?'\n\nВНИМАНИЕ:\n• '+warn.join('\n• '):''}\n\nСоздать файл?`;
+  if(!confirm(msg))return;
+  const name='shurupy_'+ord.length+'sht.nc';
+  download(new Blob([strToBytes(text)],{type:'application/octet-stream'}),name);
+  toast('Создан '+name+'. Запустите на станке — отверстия покажут, где крутить шурупы.')}
+$('#screws').addEventListener('click',e=>{
+  const row=e.target.closest('[data-si]'),a=e.target.closest('[data-sact]'),act=a&&a.dataset.sact;
+  if(act==='gen'){genScrews();return}
+  if(!row)return;const i=+row.dataset.si;
+  if(act==='sdel'){state.screws.splice(i,1);state.selScrew=-1;recomputeScrews();renderPanel();redraw();saveSoon();return}
+  if(e.target.closest('input,select,button'))return;
+  state.selScrew=i;renderPanel();redraw()});
+$('#screws').addEventListener('change',e=>{
+  const a=e.target.closest('[data-sact]');if(!a)return;const act=a.dataset.sact,v=parseFloat(a.value),row=a.closest('[data-si]');
+  if(row){const m=state.screws[+row.dataset.si];if(m&&isFinite(v)){if(act==='sx')m.x=v;else if(act==='sy')m.y=v;recomputeScrews();renderPanel();redraw();saveSoon()}return}
+  if(act==='z'&&isFinite(v))state.scr.z=v;
+  else if(act==='f'&&v>0)state.scr.f=v;
+  else if(act==='safe'&&isFinite(v))state.scr.safe=v;
+  else if(act==='tpl')state.scrTpl=a.value===''?0:+a.value;
+  saveSoon()});
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+addEventListener('keydown',e=>{
+  if(/INPUT|SELECT|TEXTAREA/.test((e.target.tagName||'')))return;
+  if((e.key==='Delete'||e.key==='Backspace')&&state.selScrew>=0){state.screws.splice(state.selScrew,1);state.selScrew=-1;recomputeScrews();renderPanel();redraw();saveSoon()}
+  if(e.key==='Escape'){state.rpts=[];state.selScrew=-1;renderPanel();redraw()}});
 
 /* ====================== размер холста ====================== */
 function resize(){dpr=Math.min(3,window.devicePixelRatio||1);const w=cv.clientWidth,h=cv.clientHeight;
