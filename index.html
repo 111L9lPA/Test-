@@ -53,6 +53,15 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
 .acts{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
 .hint{font-size:12px;color:var(--mut)}
 #pbtn{display:none}
+.num{display:inline-block;min-width:20px;height:20px;border-radius:10px;background:#333;color:#fff;font-size:12px;text-align:center;line-height:20px}
+.badge.t{background:#5f6b7a}
+.mv{border-top:1px dashed var(--line);margin-top:6px;padding-top:6px;cursor:default}
+.mvr{display:flex;gap:6px;align-items:center;margin:4px 0;font-size:12.5px}
+.mvr input,.mvr select{padding:4px 5px;border:1px solid var(--line);border-radius:6px;font:inherit;min-width:0}
+.mvr input{width:80px}
+.pad{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
+.pad .btn{padding:6px 10px}
+.card button:disabled{opacity:.35;cursor:default}
 @media(max-width:820px){
   #app{flex-direction:column-reverse}
   #panel{width:auto;height:42vh;border-right:0;border-top:1px solid var(--line)}
@@ -71,7 +80,9 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
   <input id="fi" type="file" multiple hidden>
   <button class="btn" id="bFit">Вписать лист</button>
   <button class="btn on" id="bRap">Холостые</button>
+  <button class="btn" id="bMove">Двигать</button>
   <button class="btn" id="bScrew">Шуруп</button>
+  <button class="btn" id="bRuler">Линейка</button>
   <button class="btn" id="bPng">Сохранить картинку</button>
   <button class="btn" id="bDemo">Пример</button>
   <button class="btn" id="pbtn">Панель</button>
@@ -89,6 +100,7 @@ details summary{cursor:pointer;font-weight:600;margin:4px 0}
     <div id="sheetNote" class="hint"></div>
     <h2>Программы <span id="fcnt"></span></h2>
     <div id="files"></div>
+    <div class="acts"><button class="btn sm" id="bPack">Разложить по листу</button><button class="btn sm" id="bClear">Очистить всё</button></div>
     <div class="hint" id="filesHint">Перетащите .nc файлы в окно или нажмите «Загрузить .nc». Нажмите на карточку — покажутся отступы от краёв листа, старт и финиш программы.</div>
     <h2>Предупреждения</h2>
     <div id="warns"></div>
@@ -114,7 +126,7 @@ const $=s=>document.querySelector(s);
 const COLORS=['#1a73e8','#188038','#e37400','#9334e6','#00838f','#c2185b','#6d4c41','#5f6b00'];
 const GAP=3;                       // минимальный зазор между деталями, мм
 const state={files:[],sheet:{w:0,h:0,auto:true,note:''},toolD:3.86,rapid:true,grid:true,
-  view:{s:1,ox:0,oy:0},moved:false,sel:null,screws:[],screwMode:false,screwD:8,hover:null,warns:[],conf:[],nid:1};
+  view:{s:1,ox:0,oy:0},moved:false,sel:null,screws:[],screwMode:false,screwD:8,hover:null,warns:[],conf:[],nid:1,moveMode:false,ruler:false,rpts:[],step:1,margin:10};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>{const r=Math.round(n*100)/100;return Object.is(r,-0)?'0':String(r)};
 const hexA=(h,a)=>{const n=parseInt(h.slice(1),16);return `rgba(${n>>16},${n>>8&255},${n&255},${a})`};
@@ -157,11 +169,12 @@ const mkPath=(pts,close)=>{const p=new Path2D();pts.forEach((q,i)=>i?p.lineTo(q[
 function parseNC(text){
   const log=[];const add=(lvl,line,msg,raw)=>log.push({lvl,line,msg,raw:raw==null?'':String(raw).trim().slice(0,160)});
   const lines=text.split(/\r\n|\r|\n/);
-  const r={lines:lines.length,title:null,sheet:null,tools:[],chains:[],rapids:[],log,head:lines.slice(0,15),cutSegs:0,minZ:null,feed:false,crlf:/\r\n/.test(text)};
-  const st={x:0,y:0,z:0,mode:null,abs:true,u:1};
-  let chain=null;const once={};
+  const r={lines:lines.length,title:null,sheet:null,tools:[],chains:[],rapids:[],log,head:lines.slice(0,15),cutSegs:0,minZ:null,feed:false,drills:[],block:[],cutLen:0,cutTime:0,crlf:/\r\n/.test(text)};
+  const st={x:0,y:0,z:0,mode:null,abs:true,u:1,f:0,hx:false,hy:false};
+  let chain=null,pend=null;const once={};
   const warnOnce=(k,ln,m,raw,l)=>{if(!once[k]){once[k]=1;add(l||'warn',ln,m,raw)}};
   const endChain=()=>{if(chain&&chain.segs.length)r.chains.push(chain);chain=null};
+  const commit=()=>{if(pend){r.drills.push(pend);pend=null}};
   const IGN=[4,10,40,43,49,53,54,61,64,80,90.1,91.1,94,95,98,99];
   for(let i=0;i<lines.length;i++){
     const raw=lines[i],ln=i+1;let s=raw;const cm=[];
@@ -187,19 +200,19 @@ function parseNC(text){
       else if('XYZIJKRFSN'.includes(c)){v[c]=n}
       else if('ABC'.includes(c))warnOnce('ax'+c,ln,'Ось '+c+' не поддерживается (игнорируется)',raw);
     }
-    if('F' in v)r.feed=true;
+    if('F' in v){r.feed=true;st.f=v.F*st.u}
     let motion=null;
     for(const g of gs){
       if(g===0||g===1||g===2||g===3)motion=g;
       else if(g===17)continue;
       else if(g===18||g===19)add('error',ln,'Плоскость G'+g+': поддерживается только G17 (XY)',raw);
-      else if(g===20){st.u=25.4;warnOnce('g20',ln,'G20: дюймы, координаты пересчитаны в мм',raw,'info')}
+      else if(g===20){st.u=25.4;r.block.push('G20 (дюймы)');warnOnce('g20',ln,'G20: дюймы, координаты пересчитаны в мм',raw,'info')}
       else if(g===21)st.u=1;
       else if(g===90)st.abs=true;
-      else if(g===91){st.abs=false;warnOnce('g91',ln,'G91: относительные координаты (обычно файлы в G90)',raw)}
+      else if(g===91){st.abs=false;r.block.push('G91 (относительные координаты)');warnOnce('g91',ln,'G91: относительные координаты (обычно файлы в G90)',raw)}
       else if(IGN.includes(g))continue;
       else if(g===41||g===42)warnOnce('g41',ln,'G41/G42: компенсация радиуса фрезы — траектория может отличаться от нарисованной',raw);
-      else if(g===28||g===30||g===92||(g>=55&&g<=59))warnOnce('g'+g,ln,'G'+g+': смещение/нулевая точка не учитываются визуализатором',raw);
+      else if(g===28||g===30||g===92||(g>=55&&g<=59)){if(g===92)r.block.push('G92 (смещение нуля)');warnOnce('g'+g,ln,'G'+g+': смещение/нулевая точка не учитываются визуализатором',raw)}
       else add('warn',ln,'Неизвестная или неподдерживаемая команда G'+g,raw);
     }
     if(motion!=null)st.mode=motion;
@@ -210,7 +223,7 @@ function parseNC(text){
     const ny='Y' in v?(st.abs?v.Y*st.u:st.y+v.Y*st.u):st.y;
     const nz='Z' in v?(st.abs?v.Z*st.u:st.z+v.Z*st.u):st.z;
     if(st.mode==null){add('error',ln,'Координаты без команды движения (G0/G1/G2/G3 ещё не задана)',raw);st.x=nx;st.y=ny;st.z=nz;continue}
-    const z0=st.z;let seg=null;
+    const z0=st.z,unk=!(st.hx&&st.hy);let seg=null;
     if(st.mode<2){
       if(Math.hypot(nx-st.x,ny-st.y)>1e-9)seg={t:'L',x0:st.x,y0:st.y,x1:nx,y1:ny,z0,z1:nz,line:ln};
     }else{
@@ -236,18 +249,23 @@ function parseNC(text){
     }
     const cut=st.mode!==0&&nz<-0.0005;
     if(r.minZ==null||nz<r.minZ)r.minZ=nz;
+    const plunge=!seg&&st.mode!==0&&nz<-0.0005&&nz<z0-1e-9;
+    if(pend){if(plunge)pend.z=Math.min(pend.z,nz);else if(seg&&cut)pend=null;else commit()}
+    else if(plunge)pend={x:st.x,y:st.y,z:nz,line:ln};
     if(seg){
       if(cut){
+        if(unk){seg.init=true;warnOnce('unk',ln,'Рез начинается из позиции, не заданной ни одним X/Y — принято (0,0)',raw)}
         if(!chain)chain={segs:[],zmin:0,line0:ln};
         chain.segs.push(seg);chain.zmin=Math.min(chain.zmin,nz,z0);r.cutSegs++;
+        const sl=seg.t==='L'?Math.hypot(seg.x1-seg.x0,seg.y1-seg.y0):Math.abs(seg.sw)*(seg.r0+seg.r1)/2;r.cutLen+=sl;if(st.f>0)r.cutTime+=sl/st.f;
         if(!r.feed)warnOnce('nof',ln,'Рез без заданной подачи F',raw,'info');
-      }else{endChain();r.rapids.push([seg.x0,seg.y0,seg.x1,seg.y1])}
+      }else{endChain();if(!unk)r.rapids.push([seg.x0,seg.y0,seg.x1,seg.y1])}
     }else if(st.mode!==0&&Math.abs(nz-z0)>1e-9)endChain(); // вертикальное врезание — новый проход
     else if(st.mode===0)endChain();
-    st.x=nx;st.y=ny;st.z=nz;
+    st.x=nx;st.y=ny;st.z=nz;if('X' in v)st.hx=true;if('Y' in v)st.hy=true;
   }
-  endChain();
-  if(!r.chains.length)add('error',0,'Не найдено ни одного реза (движения G1/G2/G3 при Z<0). Проверьте, что глубина задана отрицательной.','');
+  endChain();commit();
+  if(!r.chains.length&&!r.drills.length)add('error',0,'Не найдено ни одного реза (движения G1/G2/G3 при Z<0). Проверьте, что глубина задана отрицательной.','');
   if(!r.sheet)add('warn',0,'Не найдена строка (Material Size) (X=…, Y=…) — размер листа неизвестен','');
   return r}
 
@@ -271,18 +289,22 @@ function findLoop(pts){
 
 /* из «сырого» разбора — контуры, детали, статистика (зависит от диаметра фрезы) */
 function analyze(f){
-  const R=state.toolD/2,P=f.raw,groups=new Map();
+  const R=state.toolD/2,P=f.raw,groups=new Map(),ox=f.off.x,oy=f.off.y,mv=ox!==0||oy!==0;
   for(const c of P.chains){
-    if(!c.pts)c.pts=flattenChain(c);
-    if(c.pts.length<2)continue;
-    let len=0;for(let i=1;i<c.pts.length;i++)len+=Math.hypot(c.pts[i][0]-c.pts[i-1][0],c.pts[i][1]-c.pts[i-1][1]);
-    const bb=bboxOf(c.pts),key=[len,bb.x0,bb.y0,bb.x1,bb.y1].map(n=>n.toFixed(1)).join('|');
+    if(!c.base)c.base=flattenChain(c);
+    if(c.base.length<2)continue;
+    const pts=mv?c.base.map(p=>[p[0]+ox,p[1]+oy]):c.base;
+    let len=0;for(let i=1;i<pts.length;i++)len+=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);
+    const bb=bboxOf(pts),key=[len,bb.x0,bb.y0,bb.x1,bb.y1].map(n=>n.toFixed(1)).join('|');
     const g=groups.get(key);
     if(g){g.count++;g.zmin=Math.min(g.zmin,c.zmin)}
-    else groups.set(key,{pts:c.pts,bb,len,count:1,zmin:c.zmin,line0:c.line0});
+    else groups.set(key,{pts,bb,len,count:1,zmin:c.zmin,line0:c.line0});
   }
   f.uniq=[...groups.values()];
   for(const g of f.uniq){g.path=mkPath(g.pts,false);const lp=findLoop(g.pts);g.loop=lp?g.pts.slice(lp[0],lp[1]):null}
+  const dm=new Map();
+  for(const d of P.drills){const k=Math.round(d.x/0.01)+','+Math.round(d.y/0.01),q=dm.get(k);if(q)q.z=Math.min(q.z,d.z);else dm.set(k,{x:d.x+ox,y:d.y+oy,z:d.z})}
+  f.drills=[...dm.values()];
   const loops=f.uniq.filter(g=>g.loop);
   f.parts=[];
   for(const g of loops){
@@ -293,15 +315,19 @@ function analyze(f){
     f.parts.push({kind,poly,bb,w:bb.x1-bb.x0,h:bb.y1-bb.y0,path:mkPath(poly,true)});
   }
   f.cutBB=null;for(const g of f.uniq)f.cutBB=bbUnion(f.cutBB,g.bb);
+  if(f.drills.length)f.cutBB=bbUnion(f.cutBB,bboxOf(f.drills.map(d=>[d.x,d.y])));
   f.partBB=null;for(const p of f.parts)if(p.kind==='part')f.partBB=bbUnion(f.partBB,p.bb);
   f.ext=f.partBB||f.cutBB;
-  f.depth=f.uniq.length?Math.min(...f.uniq.map(g=>g.zmin)):null;
+  const zs=f.uniq.map(g=>g.zmin).concat(f.drills.map(d=>d.z));
+  f.depth=zs.length?Math.min(...zs):null;
   f.passes=f.uniq.length?Math.max(...f.uniq.map(g=>g.count)):0;
-  const c0=P.chains[0],c1=P.chains[P.chains.length-1];
-  f.start=c0?[c0.segs[0].x0,c0.segs[0].y0]:null;
-  f.end=c1?[c1.segs[c1.segs.length-1].x1,c1.segs[c1.segs.length-1].y1]:null;
-  const rp=new Path2D();for(const q of P.rapids){rp.moveTo(q[0],q[1]);rp.lineTo(q[2],q[3])}f.rapidPath=rp;
+  const c0=P.chains[0],c1=P.chains[P.chains.length-1],dl=f.drills[f.drills.length-1];
+  f.start=c0?[c0.segs[0].x0+ox,c0.segs[0].y0+oy]:f.drills.length?[f.drills[0].x,f.drills[0].y]:null;
+  f.end=c1?[c1.segs[c1.segs.length-1].x1+ox,c1.segs[c1.segs.length-1].y1+oy]:dl?[dl.x,dl.y]:null;
+  f.type=f.parts.some(p=>p.kind==='part')?(f.drills.length?'mixed':'contour'):f.drills.length?(f.uniq.length?'mixed':'drill'):'other';
+  const rp=new Path2D();for(const q of P.rapids){rp.moveTo(q[0]+ox,q[1]+oy);rp.lineTo(q[2]+ox,q[3]+oy)}f.rapidPath=rp;
 }
+const TYPES={contour:'Контур',drill:'Присадка',mixed:'Контур + присадка',other:'Рез / паз'};
 
 /* ====================== лист, предупреждения ====================== */
 function computeSheet(){
@@ -324,7 +350,7 @@ function recomputeWarnings(){
   const W=[],conf=[],sh=state.sheet;
   if(state.sheet.note)W.push({l:sh.auto&&state.files.some(f=>f.raw.sheet)?'w':'i',t:state.sheet.note});
   for(const f of state.files){
-    f.outPath=null;
+    f.outPath=null;f.outDrills=[];
     if(!f.visible||!sh.w)continue;
     const op=new Path2D();let any=false,lo=0,ro=0,bo=0,to=0;
     for(const g of f.uniq){
@@ -334,6 +360,7 @@ function recomputeWarnings(){
           const a=g.pts[Math.max(0,i-1)],b=g.pts[Math.min(g.pts.length-1,i+1)];op.moveTo(a[0],a[1]);op.lineTo(p[0],p[1]);op.lineTo(b[0],b[1])}
       }
     }
+    for(const d of f.drills){if(d.x<-0.01||d.x>sh.w+0.01||d.y<-0.01||d.y>sh.h+0.01){any=true;f.outDrills.push(d);lo=Math.max(lo,-d.x);ro=Math.max(ro,d.x-sh.w);bo=Math.max(bo,-d.y);to=Math.max(to,d.y-sh.h)}}
     if(any){f.outPath=op;const s=[];if(lo>0)s.push('слева на '+fmt(lo));if(ro>0)s.push('справа на '+fmt(ro));if(bo>0)s.push('снизу на '+fmt(bo));if(to>0)s.push('сверху на '+fmt(to));
       W.push({l:'e',t:`${f.name}: траектория выходит за лист (${s.join(', ')} мм)`})}
   }
@@ -349,6 +376,18 @@ function recomputeWarnings(){
         else if(r.d<GAP){conf.push({a:pa,b:pb,p:r.p,q:r.q,d:r.d,type:'close'});
           W.push({l:'e',t:`${vis[a].name} и ${vis[b].name}: зазор между деталями ${fmt(r.d)} мм (< ${GAP} мм)`})}
       }}
+  }
+  const idx=new Map(state.files.map((f,i)=>[f,i]));
+  for(const D of vis){if(!D.drills.length)continue;
+    const Cs=vis.filter(c=>c!==D&&c.parts.some(p=>p.kind==='part'));
+    if(!Cs.length)continue;
+    let outside=0;
+    for(const d of D.drills)if(!Cs.some(c=>c.parts.some(p=>p.kind==='part'&&inPoly([d.x,d.y],p.poly))))outside++;
+    if(outside)W.push({l:'w',t:`${D.name}: ${outside} из ${D.drills.length} отверстий не попадают ни в одну деталь`});
+    for(const C of Cs){
+      if(idx.get(C)<idx.get(D)&&D.drills.some(d=>C.parts.some(p=>p.kind==='part'&&inPoly([d.x,d.y],p.poly))))
+        W.push({l:'e',t:`Порядок: контур «${C.name}» режется раньше присадки «${D.name}» — деталь может сместиться. Поставьте присадку выше в списке (▲).`});
+    }
   }
   state.warns=W;state.conf=conf;
 }
@@ -413,12 +452,26 @@ function draw(ctx,W,H,v,o){
     ctx.strokeStyle=f.color;ctx.lineWidth=(sel?2.4:1.4)*K/s;for(const g of f.uniq)ctx.stroke(g.path);
     ctx.lineWidth=(sel?2.8:2)*K/s;ctx.strokeStyle=f.dark;
     for(const p of f.parts){ctx.setLineDash(p.kind==='hole'?[6*K/s,4*K/s]:[]);ctx.stroke(p.path)}ctx.setLineDash([]);
+    if(f.drills.length){ctx.fillStyle=hexA(f.color,.3);ctx.strokeStyle=f.dark;ctx.lineWidth=1.4*K/s;const dr=Math.max(state.toolD/2,3*K/s);
+      for(const d of f.drills){ctx.beginPath();ctx.arc(d.x,d.y,dr,0,7);ctx.fill();ctx.stroke()}}
     ctx.restore();
     // старт / финиш
     if(f.start){ctx.fillStyle='#188038';ctx.strokeStyle='#fff';ctx.lineWidth=2*K;ctx.beginPath();ctx.arc(X(f.start[0]),Y(f.start[1]),5*K,0,7);ctx.fill();ctx.stroke()}
     if(f.end){ctx.fillStyle='#111';ctx.strokeStyle='#fff';const a=5*K;ctx.beginPath();ctx.rect(X(f.end[0])-a*.8,Y(f.end[1])-a*.8,a*1.6,a*1.6);ctx.fill();ctx.stroke()}
     if(sel){ctx.font=`bold ${11*K}px system-ui,sans-serif`;ctx.textBaseline='bottom';ctx.textAlign='left';ctx.fillStyle='#188038';
       if(f.start)halo(ctx,'СТАРТ',X(f.start[0])+8*K,Y(f.start[1])-4*K,'#188038');if(f.end)halo(ctx,'ФИНИШ',X(f.end[0])+8*K,Y(f.end[1])+16*K,'#111')}
+    if(sel){
+      const badge=(n,x,y)=>{ctx.fillStyle=f.dark;ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,9*K,0,7);ctx.fill();ctx.stroke();
+        ctx.fillStyle='#fff';ctx.font=`bold ${11*K}px system-ui,sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(n,x,y+.5)};
+      f.uniq.forEach((g,i)=>{
+        let bi=0,bl=-1;for(let k=1;k<g.pts.length;k++){const l=Math.hypot(g.pts[k][0]-g.pts[k-1][0],g.pts[k][1]-g.pts[k-1][1]);if(l>bl){bl=l;bi=k}}
+        if(bi){const p=g.pts[bi-1],q=g.pts[bi],ax=X(p[0]),ay=Y(p[1]),bx=X(q[0]),by=Y(q[1]),a=Math.atan2(by-ay,bx-ax),mx=(ax+bx)/2,my=(ay+by)/2,z=8*K;
+          ctx.fillStyle=f.dark;ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(mx+Math.cos(a)*z,my+Math.sin(a)*z);ctx.lineTo(mx+Math.cos(a+2.5)*z,my+Math.sin(a+2.5)*z);ctx.lineTo(mx+Math.cos(a-2.5)*z,my+Math.sin(a-2.5)*z);ctx.closePath();ctx.fill();ctx.stroke()}
+        badge(i+1,X(g.pts[0][0])-12*K,Y(g.pts[0][1])+12*K)});
+      if(f.drills.length<=80)f.drills.forEach((d,i)=>badge(i+1,X(d.x),Y(d.y)-14*K));
+    }
+    if(f.type==='drill'&&f.ext){const e=f.ext;ctx.font=`bold ${12*K}px system-ui,sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';
+      halo(ctx,`Присадка · ${f.drills.length} отв. · ${f.name}`,X((e.x0+e.x1)/2),Y(e.y1)-12*K,f.dark)}
     // подписи деталей
     for(const p of f.parts){if(p.kind!=='part')continue;
       const lines=[[fmt(p.w)+' x '+fmt(p.h),true],[f.name,false]];if(f.raw.title&&f.raw.title!==f.name.replace(/\.[^.]+$/,''))lines.push([f.raw.title,false]);
@@ -436,6 +489,7 @@ function draw(ctx,W,H,v,o){
   for(const f of state.files)if(f.visible&&f.outPath){ctx.strokeStyle='#e00000';ctx.lineWidth=4*K/s;ctx.stroke(f.outPath)}
   ctx.lineWidth=3*K/s;ctx.strokeStyle='#e00000';
   for(const c of state.conf){ctx.stroke(c.a.path);ctx.stroke(c.b.path)}
+  for(const f of state.files)if(f.visible)for(const d of f.outDrills||[]){ctx.beginPath();ctx.arc(d.x,d.y,Math.max(state.toolD/2,5*K/s),0,7);ctx.stroke()}
   ctx.restore();
   for(const c of state.conf){
     ctx.strokeStyle='#e00000';ctx.lineWidth=2*K;ctx.beginPath();ctx.moveTo(X(c.p[0]),Y(c.p[1]));ctx.lineTo(X(c.q[0]),Y(c.q[1]));ctx.stroke();
@@ -456,6 +510,12 @@ function draw(ctx,W,H,v,o){
     ctx.fillStyle=hexA(col,.25);ctx.strokeStyle=col;ctx.lineWidth=2*K;ctx.beginPath();ctx.arc(X(m.x),Y(m.y),r,0,7);ctx.fill();ctx.stroke();
     ctx.beginPath();ctx.moveTo(X(m.x)-r*.6,Y(m.y));ctx.lineTo(X(m.x)+r*.6,Y(m.y));ctx.moveTo(X(m.x),Y(m.y)-r*.6);ctx.lineTo(X(m.x),Y(m.y)+r*.6);ctx.stroke();
     ctx.font=`bold ${11*K}px system-ui,sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom';halo(ctx,'Ш'+(i+1),X(m.x)+r+2*K,Y(m.y)-2*K,col)});
+  if(!o.export&&state.rpts.length){
+    ctx.strokeStyle='#7a1fa2';ctx.fillStyle='#7a1fa2';ctx.lineWidth=2;
+    state.rpts.forEach(q=>{ctx.beginPath();ctx.arc(X(q.x),Y(q.y),4,0,7);ctx.fill()});
+    if(state.rpts.length===2){const[a,b]=state.rpts;ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();
+      const t=`${fmt(Math.hypot(b.x-a.x,b.y-a.y))} мм  (ΔX ${fmt(b.x-a.x)}, ΔY ${fmt(b.y-a.y)})`;ctx.font='bold 12px system-ui,sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';halo(ctx,t,(X(a.x)+X(b.x))/2,(Y(a.y)+Y(b.y))/2-6,'#7a1fa2')}
+  }
   if(!o.export&&state.hover){const h=state.hover;ctx.strokeStyle='rgba(0,0,0,.5)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(h.x)-7,Y(h.y));ctx.lineTo(X(h.x)+7,Y(h.y));ctx.moveTo(X(h.x),Y(h.y)-7);ctx.lineTo(X(h.x),Y(h.y)+7);ctx.stroke()}
   if(o.export){ // легенда
     ctx.textAlign='left';ctx.textBaseline='middle';ctx.font=`bold ${13*K}px system-ui,sans-serif`;
@@ -481,25 +541,38 @@ function setHover(px,py){
 const ptrs=new Map();let tapInfo=null,pinch=null;
 const rel=e=>{const r=cv.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}};
 cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,rel(e));
-  if(ptrs.size===1)tapInfo={...rel(e),moved:false};else{tapInfo&&(tapInfo.moved=true);const[a,b]=[...ptrs.values()];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),mx:(a.x+b.x)/2,my:(a.y+b.y)/2}}});
+  if(ptrs.size===1)tapInfo={...rel(e),moved:false,ax:0,ay:0};else{tapInfo&&(tapInfo.moved=true);const[a,b]=[...ptrs.values()];pinch={d:Math.hypot(a.x-b.x,a.y-b.y),mx:(a.x+b.x)/2,my:(a.y+b.y)/2}}});
 cv.addEventListener('pointermove',e=>{
   const p=rel(e);if(!ptrs.has(e.pointerId)){if(e.pointerType==='mouse')setHover(p.x,p.y);return}
   const old=ptrs.get(e.pointerId);ptrs.set(e.pointerId,p);
   if(ptrs.size===1){
     if(tapInfo&&!tapInfo.moved&&Math.hypot(p.x-tapInfo.x,p.y-tapInfo.y)>5)tapInfo.moved=true;
-    if(tapInfo&&tapInfo.moved){state.view.ox+=p.x-old.x;state.view.oy+=p.y-old.y;state.moved=true;redraw()}
+    if(tapInfo&&tapInfo.moved){
+      const sf=state.moveMode&&state.files.find(f=>f.id===state.sel&&f.visible);
+      if(sf){tapInfo.ax+=(p.x-old.x)/state.view.s;tapInfo.ay-=(p.y-old.y)/state.view.s;
+        const dx=Math.round(tapInfo.ax/0.1)*0.1,dy=Math.round(tapInfo.ay/0.1)*0.1;
+        if(dx||dy){tapInfo.ax-=dx;tapInfo.ay-=dy;tapInfo.dragged=true;moveGroup(sf,dx,dy,true)}}
+      else{state.view.ox+=p.x-old.x;state.view.oy+=p.y-old.y;state.moved=true;redraw()}}
     if(e.pointerType==='mouse')setHover(p.x,p.y);
   }else if(ptrs.size===2&&pinch){
     const[a,b]=[...ptrs.values()],d=Math.hypot(a.x-b.x,a.y-b.y),mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
     state.view.ox+=mx-pinch.mx;state.view.oy+=my-pinch.my;if(pinch.d>0)zoomAt(mx,my,d/pinch.d);pinch={d,mx,my}}});
 const endPtr=e=>{const was=ptrs.size;ptrs.delete(e.pointerId);
   if(e.type==='pointerup'&&was===1&&tapInfo&&!tapInfo.moved)onTap(tapInfo.x,tapInfo.y);
+  else if(was===1&&tapInfo&&tapInfo.dragged){renderPanel();saveSoon()}
   if(ptrs.size<2)pinch=null;if(ptrs.size===0)tapInfo=null;else if(tapInfo)tapInfo.moved=true};
 cv.addEventListener('pointerup',endPtr);cv.addEventListener('pointercancel',endPtr);
 cv.addEventListener('pointerleave',e=>{if(e.pointerType==='mouse'){state.hover=null;$('#status').textContent='X — Y — мм';redraw()}});
 cv.addEventListener('wheel',e=>{e.preventDefault();const p=rel(e);zoomAt(p.x,p.y,Math.exp(-e.deltaY*(e.ctrlKey?0.01:0.0015)))},{passive:false});
+function hitFile(p){
+  for(let i=state.files.length-1;i>=0;i--){const f=state.files[i];if(!f.visible)continue;
+    if(f.parts.some(q=>q.kind==='part'&&inPoly([p.x,p.y],q.poly)))return f;
+    if(f.drills.some(d=>Math.hypot(d.x-p.x,d.y-p.y)<Math.max(state.toolD,6/state.view.s)))return f}
+  return null}
 function onTap(px,py){
   setHover(px,py);const p=state.hover;
+  if(state.ruler){if(state.rpts.length>=2)state.rpts=[];state.rpts.push({x:p.x,y:p.y});redraw();return}
+  if(!state.screwMode){const hit=hitFile(p);if(hit&&state.sel!==hit.id){state.sel=hit.id;renderPanel();redraw()}return}
   if(state.screwMode){
     const near=state.screws.findIndex(m=>Math.hypot(m.x-p.x,m.y-p.y)*state.view.s<Math.max(state.screwD/2*state.view.s,14));
     if(near>=0)state.screws.splice(near,1);else state.screws.push({x:p.x,y:p.y});
@@ -507,26 +580,45 @@ function onTap(px,py){
 
 /* ====================== панель ====================== */
 function renderPanel(){
+  const ae=document.activeElement,fk=ae&&ae.dataset&&ae.dataset.act&&ae.closest&&ae.closest('#files .card')?{id:ae.closest('.card').dataset.id,act:ae.dataset.act}:null;
   $('#fcnt').textContent=state.files.length?'('+state.files.length+')':'';
   $('#filesHint').style.display=state.files.length?'none':'';
   $('#empty').style.display=state.files.length?'none':'';
   const sh=state.sheet;
-  $('#files').innerHTML=state.files.map(f=>{
+  $('#files').innerHTML=state.files.map((f,i)=>{
     const e=f.ext,errs=f.raw.log.filter(l=>l.lvl==='error').length,wr=f.raw.log.filter(l=>l.lvl==='warn').length;
-    const pb=f.partBB;
-    return `<div class="card${state.sel===f.id?' sel':''}" data-id="${f.id}" style="border-left-color:${f.color}">
-<div class="row"><b class="nm" title="${esc(f.name)}">${esc(f.name)}</b>
+    const pb=f.partBB,sel=state.sel===f.id,mates=state.files.filter(x=>x.gid===f.gid&&x!==f),moved=f.off.x||f.off.y;
+    let h=`<div class="card${sel?' sel':''}" data-id="${f.id}" style="border-left-color:${f.color}">
+<div class="row"><span class="num">${i+1}</span><b class="nm" title="${esc(f.name)}">${esc(f.name)}</b>
+<button class="x" data-act="up" title="Выше — раньше на станке" ${i?'':'disabled'}>▲</button><button class="x" data-act="down" title="Ниже — позже на станке" ${i<state.files.length-1?'':'disabled'}>▼</button>
 <input type="checkbox" data-act="vis" ${f.visible?'checked':''} title="Показать / скрыть">
 <button class="x" data-act="del" title="Удалить">✕</button></div>
-${f.raw.title?`<div class="kv"><i>Название:</i> ${esc(f.raw.title)}</div>`:''}
-<div class="kv"><i>Деталь:</i> <b>${pb?fmt(pb.x1-pb.x0)+' x '+fmt(pb.y1-pb.y0):'—'}</b> мм${f.parts.some(p=>p.kind==='hole')?' <i>(+вырезы)</i>':''}</div>
-<div class="kv"><i>Глубина:</i> Z ${f.depth==null?'—':fmt(f.depth)} · <i>проходов:</i> ${f.passes} · <i>контуров:</i> ${f.uniq.length}</div>
+<div class="kv"><span class="badge t">${TYPES[f.type]}</span>${f.raw.title?esc(f.raw.title):''}</div>
+${pb?`<div class="kv"><i>Деталь:</i> <b>${fmt(pb.x1-pb.x0)} x ${fmt(pb.y1-pb.y0)}</b> мм${f.parts.some(p=>p.kind==='hole')?' <i>(+вырезы)</i>':''}</div>`:''}
+${f.drills.length?`<div class="kv"><i>Отверстий:</i> <b>${f.drills.length}</b></div>`:''}
+<div class="kv"><i>Глубина:</i> Z ${f.depth==null?'—':fmt(f.depth)}${f.uniq.length?` · <i>проходов:</i> ${f.passes} · <i>контуров:</i> ${f.uniq.length}`:''}${f.raw.cutTime>0?` · ≈${f.raw.cutTime<1?'<1':f.raw.cutTime.toFixed(1)} мин реза`:''}</div>
 ${e?`<div class="kv"><i>X:</i> ${fmt(e.x0)} … ${fmt(e.x1)} · <i>Y:</i> ${fmt(e.y0)} … ${fmt(e.y1)}</div>
 <div class="kv"><i>Отступы от листа:</i> ← ${fmt(e.x0)} · → ${sh.w?fmt(sh.w-e.x1):'?'} · ↓ ${fmt(e.y0)} · ↑ ${sh.h?fmt(sh.h-e.y1):'?'}</div>`:''}
 ${f.start?`<div class="kv"><i>Старт:</i> ${fmt(f.start[0])}, ${fmt(f.start[1])} · <i>финиш:</i> ${fmt(f.end[0])}, ${fmt(f.end[1])}</div>`:''}
+${moved?`<div class="kv"><i>Сдвиг от файла:</i> <b>X ${f.off.x>=0?'+':''}${fmt(f.off.x)}, Y ${f.off.y>=0?'+':''}${fmt(f.off.y)}</b></div>`:''}
+${mates.length?`<div class="kv"><i>Двигается вместе с:</i> ${mates.map(m=>esc(m.name)).join(', ')}</div>`:''}
 <div class="kv"><i>Инструмент:</i> ${f.raw.tools.length?f.raw.tools.map(t=>'T'+t.n).join(', '):'не указан'}${f.raw.tools.length>1?' <span class="badge w">несколько фрез</span>':''}</div>
-${errs||wr?`<div class="kv">${errs?`<span class="badge e">ошибок: ${errs}</span>`:''}${wr?`<span class="badge w">замечаний: ${wr}</span>`:''}</div>`:''}
-</div>`}).join('');
+${errs||wr?`<div class="kv">${errs?`<span class="badge e">ошибок: ${errs}</span>`:''}${wr?`<span class="badge w">замечаний: ${wr}</span>`:''}</div>`:''}`;
+    if(sel){
+      const others=state.files.filter(x=>x!==f);
+      h+=`<div class="mv">
+<div class="mvr"><span>Сдвиг X</span><input type="number" step="0.1" data-act="ox" value="${fmt(f.off.x)}"><span>Y</span><input type="number" step="0.1" data-act="oy" value="${fmt(f.off.y)}"></div>
+<div class="pad"><button class="btn" data-act="nudge" data-dx="-1" data-dy="0" title="влево">◀</button><button class="btn" data-act="nudge" data-dx="0" data-dy="1" title="вверх">▲</button><button class="btn" data-act="nudge" data-dx="0" data-dy="-1" title="вниз">▼</button><button class="btn" data-act="nudge" data-dx="1" data-dy="0" title="вправо">▶</button>
+<select data-act="step">${[0.1,1,10,100].map(v=>`<option${v===state.step?' selected':''}>${v}</option>`).join('')}</select><span class="hint">шаг, мм</span></div>
+<div class="mvr"><span>Отступ от края</span><input type="number" min="0" data-act="mg" value="${state.margin}"><span class="hint">мм</span></div>
+<div class="pad"><button class="btn sm" data-act="al" data-s="l">⇤ влево</button><button class="btn sm" data-act="al" data-s="r">вправо ⇥</button><button class="btn sm" data-act="al" data-s="b">↧ вниз</button><button class="btn sm" data-act="al" data-s="t">↥ вверх</button><button class="btn sm" data-act="al" data-s="c">по центру</button></div>
+${others.length?`<div class="mvr"><span>Двигать вместе с</span><select data-act="link"><option value="">— ни с кем</option>${others.map(o=>`<option value="${o.id}"${mates.includes(o)?' selected':''}>${esc(o.name)}</option>`).join('')}</select></div>`:''}
+<div class="mvr"><span>Цвет</span><input type="color" data-act="color" value="${f.color}" style="width:40px;padding:0"></div>
+<div class="pad"><button class="btn pri sm" data-act="export" ${moved?'':'disabled'}>Сохранить сдвинутый .nc</button><button class="btn sm" data-act="reset" ${moved?'':'disabled'}>Сбросить сдвиг</button></div>
+</div>`;
+    }
+    return h+'</div>'}).join('');
+  if(fk){const el=document.querySelector(`#files .card[data-id="${fk.id}"] [data-act="${fk.act}"]`);if(el&&/INPUT|SELECT/.test(el.tagName)){el.focus();try{el.select()}catch(e){}}}
   $('#warns').innerHTML=state.warns.length?state.warns.map(w=>`<div class="wl ${w.l}">${esc(w.t)}</div>`).join(''):(state.files.length?'<div class="ok">Проблем с раскроем не найдено ✓</div>':'<div class="hint">Пока нет данных.</div>');
   $('#sheetNote').textContent=sh.w?`Сейчас: лист ${fmt(sh.w)} × ${fmt(sh.h)} мм${sh.auto?' (авто)':' (вручную)'}`:'';
   $('#screws').innerHTML=state.screws.length?'<h2>Шурупы</h2>'+state.screws.map((m,i)=>{
@@ -539,31 +631,65 @@ ${errs||wr?`<div class="kv">${errs?`<span class="badge e">ошибок: ${errs}<
   $('#log').innerHTML=all.length?all.slice(0,300).map(l=>`<div class="lg ${l.lvl}">[${esc(l.f)}${l.line?':'+l.line:''}] ${esc(l.msg)}${l.raw?` <code>${esc(l.raw)}</code>`:''}</div>`).join(''):'<div class="hint">Ошибок разбора нет.</div>';
   $('#logd').open=ne>0;
 }
+function moveGroup(f,dx,dy,lite){
+  for(const x of state.files)if(x.gid===f.gid){x.off.x=Math.round((x.off.x+dx)*1000)/1000;x.off.y=Math.round((x.off.y+dy)*1000)/1000;analyze(x)}
+  if(lite){recomputeWarnings();recomputeScrews();redraw()}else refresh(false)}
+function groupExt(f){let bb=null;for(const x of state.files)if(x.gid===f.gid&&x.ext)bb=bbUnion(bb,x.ext);return bb}
+function alignGroup(f,sd){
+  const sh=state.sheet,bb=groupExt(f),m=state.margin;if(!bb||!sh.w)return;let dx=0,dy=0;
+  if(sd==='l')dx=m-bb.x0;else if(sd==='r')dx=sh.w-m-bb.x1;else if(sd==='b')dy=m-bb.y0;else if(sd==='t')dy=sh.h-m-bb.y1;
+  else{dx=(sh.w-(bb.x1-bb.x0))/2-bb.x0;dy=(sh.h-(bb.y1-bb.y0))/2-bb.y0}
+  moveGroup(f,dx,dy)}
+const darken=hex=>{const n=parseInt(hex.slice(1),16);return `rgb(${(n>>16)*.7|0},${(n>>8&255)*.7|0},${(n&255)*.7|0})`};
 $('#files').addEventListener('click',e=>{
   const card=e.target.closest('.card');if(!card)return;const f=state.files.find(x=>x.id==card.dataset.id);if(!f)return;
-  const act=e.target.dataset.act;
-  if(act==='vis'){f.visible=e.target.checked;refresh(false);return}
+  const a=e.target.closest('[data-act]'),act=a&&a.dataset.act,i=state.files.indexOf(f);
+  if(act==='vis'){f.visible=a.checked;refresh(false);return}
   if(act==='del'){state.files=state.files.filter(x=>x!==f);if(state.sel===f.id)state.sel=null;refresh(true);return}
+  if(act==='up'||act==='down'){const j=i+(act==='up'?-1:1);if(j>=0&&j<state.files.length){[state.files[i],state.files[j]]=[state.files[j],state.files[i]];refresh(false)}return}
+  if(act==='nudge'){moveGroup(f,+a.dataset.dx*state.step,+a.dataset.dy*state.step);return}
+  if(act==='al'){alignGroup(f,a.dataset.s);return}
+  if(act==='export'){exportShifted(f);return}
+  if(act==='reset'){for(const x of state.files)if(x.gid===f.gid){x.off={x:0,y:0};analyze(x)}refresh(false);return}
+  if(e.target.closest('input,select,button,.mv'))return;
   state.sel=state.sel===f.id?null:f.id;renderPanel();redraw()});
+$('#files').addEventListener('change',e=>{
+  const card=e.target.closest('.card'),a=e.target.closest('[data-act]');if(!card||!a)return;const f=state.files.find(x=>x.id==card.dataset.id);if(!f)return;
+  const act=a.dataset.act,v=parseFloat(a.value);
+  if(act==='ox'&&isFinite(v))moveGroup(f,v-f.off.x,0);
+  else if(act==='oy'&&isFinite(v))moveGroup(f,0,v-f.off.y);
+  else if(act==='step'&&v>0)state.step=v;
+  else if(act==='mg'&&v>=0)state.margin=v;
+  else if(act==='color'){f.color=a.value;f.dark=darken(f.color);renderPanel();redraw();saveSoon()}
+  else if(act==='link'){
+    if(!a.value){f.gid=state.nid++}else{const o=state.files.find(x=>x.id==a.value);if(o){const old=f.gid;for(const x of state.files)if(x.gid===old)x.gid=o.gid}}
+    refresh(false)}});
 
-function refresh(refit){computeSheet();recomputeWarnings();recomputeScrews();renderPanel();if(refit)fit();else redraw()}
+function refresh(refit){computeSheet();recomputeWarnings();recomputeScrews();renderPanel();if(refit)fit();else redraw();saveSoon()}
 
 /* ====================== загрузка файлов ====================== */
-async function readFile(file){
-  const buf=await file.arrayBuffer();let text,enc='UTF-8';
-  try{text=new TextDecoder('utf-8',{fatal:true}).decode(buf)}catch(e){text=new TextDecoder('windows-1251').decode(buf);enc='windows-1251'}
-  return{text:text.replace(/^﻿/,''),enc}}
-function addText(name,text,enc){
-  const f={id:state.nid++,name,color:COLORS[(state.nid-2)%COLORS.length],visible:true,enc:enc||'UTF-8'};
-  const hex=f.color,n=parseInt(hex.slice(1),16);f.dark=`rgb(${(n>>16)*.7|0},${(n>>8&255)*.7|0},${(n&255)*.7|0})`;
+const readFile=async file=>new Uint8Array(await file.arrayBuffer());
+function decodeBytes(u8){let text,enc='UTF-8';
+  try{text=new TextDecoder('utf-8',{fatal:true}).decode(u8)}catch(e){text=new TextDecoder('windows-1251').decode(u8);enc='windows-1251'}
+  return{text:text.replace(/^\uFEFF/,''),enc}}
+function addBytes(name,u8,opt){const{text,enc}=decodeBytes(u8);return addText(name,text,enc,u8,opt)}
+function addText(name,text,enc,bytes,opt){
+  opt=opt||{};
+  const f={id:state.nid++,name,visible:opt.vis!==false,enc:enc||'UTF-8',bytes:bytes||new TextEncoder().encode(text),off:{x:opt.off?+opt.off.x||0:0,y:opt.off?+opt.off.y||0:0}};
+  f.gid=f.id;f.color=opt.color||COLORS[(f.id-1)%COLORS.length];f.dark=darken(f.color);
   try{f.raw=parseNC(text);analyze(f)}
-  catch(err){f.raw={lines:0,title:null,sheet:null,tools:[],chains:[],rapids:[],head:text.split(/\r?\n/).slice(0,15),log:[{lvl:'error',line:0,msg:'Внутренняя ошибка разбора: '+(err&&err.stack||err),raw:''}],cutSegs:0,minZ:null};
-    f.uniq=[];f.parts=[];f.passes=0;f.depth=null;f.ext=null;f.rapidPath=new Path2D();f.start=f.end=null;f.partBB=f.cutBB=null}
-  state.files.push(f);return f}
+  catch(err){f.raw={lines:0,title:null,sheet:null,tools:[],chains:[],rapids:[],drills:[],block:['ошибка разбора'],head:text.split(/\r?\n/).slice(0,15),log:[{lvl:'error',line:0,msg:'Внутренняя ошибка разбора: '+(err&&err.stack||err),raw:''}],cutSegs:0,minZ:null,cutLen:0,cutTime:0};
+    f.uniq=[];f.parts=[];f.drills=[];f.passes=0;f.depth=null;f.ext=null;f.type='other';f.rapidPath=new Path2D();f.start=f.end=null;f.partBB=f.cutBB=null}
+  state.files.push(f);if(!opt.noLink)autoLink(f);return f}
+function autoLink(nf){ // присадка, целиком лежащая внутри детали другого файла, двигается вместе с ним
+  const inside=(D,C)=>D.type==='drill'&&D.gid===D.id&&C.parts.some(p=>p.kind==='part')&&D.drills.every(d=>C.parts.some(p=>p.kind==='part'&&inPoly([d.x,d.y],p.poly)));
+  for(const o of state.files){if(o===nf)continue;
+    let D=null,C=null;if(inside(nf,o)){D=nf;C=o}else if(inside(o,nf)){D=o;C=nf}
+    if(D){const old=D.gid;for(const x of state.files)if(x.gid===old)x.gid=C.gid;toast('«'+D.name+'» связана с «'+C.name+'» — двигаются вместе');break}}}
 async function loadFiles(list){
   const arr=[...list];if(!arr.length)return;
   for(const file of arr){
-    try{const{text,enc}=await readFile(file);addText(file.name,text,enc)}
+    try{addBytes(file.name,await readFile(file))}
     catch(err){toast('Не удалось прочитать '+file.name)}}
   refresh(true);const errs=state.files.reduce((a,f)=>a+f.raw.log.filter(l=>l.lvl==='error').length,0);
   if(errs)toast('В файлах есть ошибки — см. «Лог разбора»');}
@@ -584,8 +710,13 @@ function sampleRect(w,h,x,y,title,opt){
     L.push('G0Z30.0000');
   });
   L.push('M5','M30');return L.join('\r\n')+'\r\n'}
+function sampleDrill(pts,title,z){
+  const L=['(Material Size) (X=1044.000, Y=1223.000, Z=0.000)','('+title+')','G90 G21','M3 S18000','G0 Z30.0000'];
+  pts.forEach(q=>L.push(`G0X${q[0].toFixed(4)}Y${q[1].toFixed(4)}`,'G0Z5.0000',`G1Z${z.toFixed(4)}F600`,'G0Z30.0000'));
+  L.push('M5','M30');return L.join('\r\n')+'\r\n'}
 function loadDemo(){
-  state.files=[];state.sel=null;
+  state.files=[];state.sel=null;state.screws=[];
+  addText('prisadka_stoleshnica.nc',sampleDrill([[40,40],[40,230],[40,426],[493,40],[493,230],[493,426],[266,230]],'Присадка столешницы',-12));
   addText('stoleshnica_493x426.NC',sampleRect(493,426,20,20,'Столешница 1, дуги G2 R1.93',{R:true}));
   addText('fasad_610x510.nc',sampleRect(610,510,20,460,'Фасад 2, дуги I J'));
   refresh(true)}
@@ -598,11 +729,12 @@ function buildReport(){
   o.push('');o.push('=== ОБЩЕЕ ===');
   o.push(`Лист: ${sh.w?fmt(sh.w)+' x '+fmt(sh.h)+' мм'+(sh.auto?' (авто)':' (вручную)'):'не определён'}`);
   o.push(`Фреза: ${state.toolD} мм (радиус ${fmt(state.toolD/2)}), мин. зазор между деталями ${GAP} мм`);
-  o.push('Файлов: '+state.files.length);
+  o.push('Файлов: '+state.files.length+' (порядок запуска сверху вниз): '+state.files.map((f,i)=>(i+1)+'. '+f.name).join('; '));
   for(const f of state.files){
     const P=f.raw;o.push('');o.push('=== ФАЙЛ: '+f.name+' ===');
     o.push(`Строк: ${P.lines}, кодировка: ${f.enc}, CRLF: ${P.crlf?'да':'нет'}`);
     o.push(`Название (комментарий): ${P.title||'—'}`);
+    o.push(`Тип: ${TYPES[f.type]}, отверстий: ${f.drills.length}, сдвиг от файла: X ${fmt(f.off.x)}, Y ${fmt(f.off.y)}${P.cutTime>0?`, время реза ≈ ${P.cutTime.toFixed(1)} мин`:''}`);
     o.push(`Material Size: ${P.sheet?fmt(P.sheet.w)+' x '+fmt(P.sheet.h):'не найден'}`);
     o.push(`Инструменты: ${P.tools.length?P.tools.map(t=>'T'+t.n+' (строка '+t.line+')').join(', '):'не указаны'}`);
     o.push(`Резов (сегментов): ${P.cutSegs}, цепочек: ${P.chains.length}, уникальных контуров: ${f.uniq.length}, замкнутых: ${f.parts.length}, проходов (макс. повторов контура): ${f.passes}, мин. Z: ${f.depth==null?'—':fmt(f.depth)}`);
@@ -627,7 +759,7 @@ $('#bSave').onclick=()=>{if(!state.files.length)return toast('Сначала з�
 /* ====================== кнопки ====================== */
 $('#bFit').onclick=fit;
 $('#bRap').onclick=e=>{state.rapid=!state.rapid;e.currentTarget.classList.toggle('on',state.rapid);redraw()};
-$('#bScrew').onclick=e=>{state.screwMode=!state.screwMode;e.currentTarget.classList.toggle('on',state.screwMode);toast(state.screwMode?'Режим «Шуруп»: нажмите на лист, чтобы поставить / убрать шуруп':'Режим «Шуруп» выключен')};
+$('#bScrew').onclick=e=>{state.screwMode=!state.screwMode;if(state.screwMode){state.ruler=false;state.rpts=[];$('#bRuler').classList.remove('on')}e.currentTarget.classList.toggle('on',state.screwMode);toast(state.screwMode?'Режим «Шуруп»: нажмите на лист, чтобы поставить / убрать шуруп':'Режим «Шуруп» выключен')};
 $('#bClearScrew').onclick=()=>{state.screws=[];renderPanel();redraw()};
 $('#pbtn').onclick=()=>{$('#panel').classList.toggle('hide');setTimeout(()=>{resize();if(!state.moved)fit()},30)};
 $('#bPng').onclick=()=>{
@@ -644,11 +776,104 @@ numIn($('#tool'),n=>{state.toolD=n;state.files.forEach(analyze);refresh(false)})
 numIn($('#scD'),n=>{state.screwD=n;recomputeScrews();renderPanel();redraw()});
 $('#tool').value=state.toolD;$('#scD').value=state.screwD;
 
+/* ====================== сдвиг и сохранение .nc ====================== */
+const XYRE=/([XYxy])(\s*)([+-]?(?:\d+\.?\d*|\.\d+))/g;
+function mapCode(line,fn){ // применяет fn только к тексту вне комментариев
+  let res='',buf='',par=false;
+  for(let i=0;i<line.length;i++){const ch=line[i];
+    if(par){res+=ch;if(ch===')')par=false}
+    else if(ch==='('){res+=fn(buf)+'(';buf='';par=true}
+    else if(ch===';')return res+fn(buf)+line.slice(i);
+    else buf+=ch}
+  return res+fn(buf)}
+function bytesToStr(u8){let r='';for(let i=0;i<u8.length;i+=8192)r+=String.fromCharCode.apply(null,u8.subarray(i,i+8192));return r}
+function strToBytes(t){const u=new Uint8Array(t.length);for(let i=0;i<t.length;i++)u[i]=t.charCodeAt(i)&255;return u}
+function shiftText(src,dx,dy){
+  return src.split(/(\r\n|\r|\n)/).map((ln,i)=>i%2?ln:mapCode(ln,c=>c.replace(XYRE,(m,l,sp,num)=>{
+    const d=l.toUpperCase()==='X'?dx:dy;if(!d)return m;
+    const dec=Math.min(6,Math.max((num.split('.')[1]||'').length,4));let o=(parseFloat(num)+d).toFixed(dec);
+    if(parseFloat(o)===0)o=(0).toFixed(dec);return l+sp+o}))).join('')}
+function verifyShift(src,out,dx,dy){
+  const bad=m=>({ok:false,msg:m}),T=1e-3,near=(a,b,d)=>Math.abs(a+d-b)<T;
+  const la=src.split(/\r\n|\r|\n/),lb=out.split(/\r\n|\r|\n/);
+  if(la.length!==lb.length)return bad('число строк изменилось');
+  const sk=l=>mapCode(l,c=>c.replace(XYRE,'$1#'));
+  for(let i=0;i<la.length;i++)if(sk(la[i])!==sk(lb[i]))return bad('изменился посторонний текст в строке '+(i+1));
+  const A=parseNC(src),B=parseNC(out);
+  if(A.chains.length!==B.chains.length||A.rapids.length!==B.rapids.length||A.drills.length!==B.drills.length||A.cutSegs!==B.cutSegs)return bad('число движений изменилось');
+  let n=0;
+  for(let i=0;i<A.chains.length;i++){const a=A.chains[i],b=B.chains[i];if(a.segs.length!==b.segs.length)return bad('цепочка '+(i+1)+' изменилась');
+    for(let k=0;k<a.segs.length;k++){const s=a.segs[k],t=b.segs[k];n++;
+      if(s.t!==t.t||(!s.init&&(!near(s.x0,t.x0,dx)||!near(s.y0,t.y0,dy)))||!near(s.x1,t.x1,dx)||!near(s.y1,t.y1,dy)||Math.abs(s.z0-t.z0)>1e-6||Math.abs(s.z1-t.z1)>1e-6)return bad('движение в строке '+s.line+' не совпало со сдвигом');
+      if(s.t==='A'&&(!near(s.cx,t.cx,dx)||!near(s.cy,t.cy,dy)||s.cw!==t.cw||Math.abs(s.sw-t.sw)>1e-6))return bad('дуга в строке '+s.line+' не совпала со сдвигом')}}
+  for(let i=0;i<A.rapids.length;i++){const a=A.rapids[i],b=B.rapids[i];n++;if(!near(a[0],b[0],dx)||!near(a[1],b[1],dy)||!near(a[2],b[2],dx)||!near(a[3],b[3],dy))return bad('холостой ход №'+(i+1)+' не совпал со сдвигом')}
+  for(let i=0;i<A.drills.length;i++){const a=A.drills[i],b=B.drills[i];n++;if(!near(a.x,b.x,dx)||!near(a.y,b.y,dy)||Math.abs(a.z-b.z)>1e-6)return bad('отверстие №'+(i+1)+' не совпало со сдвигом')}
+  return{ok:true,n}}
+function exportShifted(f){
+  const dx=f.off.x,dy=f.off.y;
+  if(!dx&&!dy)return toast('Сдвиг нулевой — сохранять нечего');
+  const bad=[];
+  if(f.raw.block.length)bad.push('в файле есть '+[...new Set(f.raw.block)].join(', ')+' — автоматический сдвиг небезопасен');
+  if(f.raw.log.some(l=>l.lvl==='error'))bad.push('в файле есть ошибки разбора (см. лог) — не уверен, что понял программу правильно');
+  if(f.outPath||(f.outDrills&&f.outDrills.length))bad.push('после сдвига траектория или отверстия выходят за лист');
+  if(bad.length)return alert('Файл НЕ сохранён:\n• '+bad.join('\n• '));
+  const src=bytesToStr(f.bytes),out=shiftText(src,dx,dy),v=verifyShift(src,out,dx,dy);
+  if(!v.ok)return alert('Самопроверка не пройдена, файл НЕ сохранён: '+v.msg);
+  const e=f.ext,sh=state.sheet,errs=state.warns.filter(w=>w.l==='e').map(w=>w.t),sg=n=>(n>=0?'+':'')+fmt(n);
+  const msg=`Файл: ${f.name}\nСдвиг: X ${sg(dx)}, Y ${sg(dy)} мм\nСамопроверка: ${v.n} движений совпали с исходными со сдвигом, остальной текст файла не изменён, Z и подачи прежние.\nПосле сдвига занимает X ${fmt(e.x0)}…${fmt(e.x1)}, Y ${fmt(e.y0)}…${fmt(e.y1)}\nОтступы: слева ${fmt(e.x0)}, справа ${fmt(sh.w-e.x1)}, снизу ${fmt(e.y0)}, сверху ${fmt(sh.h-e.y1)}${errs.length?'\n\nКРАСНЫЕ ПРЕДУПРЕЖДЕНИЯ:\n• '+errs.join('\n• '):''}\n\nСохранить новый файл?`;
+  if(!confirm(msg))return;
+  const name=f.name.replace(/(\.[^.]*)?$/,m=>`_dX${fmt(dx)}_dY${fmt(dy)}${m}`);
+  download(new Blob([strToBytes(out)],{type:'application/octet-stream'}),name);
+  toast('Сохранено: '+name+'. Исходный файл не изменён.')}
+
+/* ====================== раскладка по листу ====================== */
+function packAll(){
+  const sh=state.sheet;if(!sh.w)return toast('Сначала загрузите файлы или задайте размер листа');
+  const items=[...new Set(state.files.map(f=>f.gid))].map(g=>{
+    const fs=state.files.filter(f=>f.gid===g);let bb=null;fs.forEach(f=>bb=bbUnion(bb,f.cutBB));
+    return bb&&{fs,bb,w:bb.x1-bb.x0+state.toolD,h:bb.y1-bb.y0+state.toolD}}).filter(Boolean);
+  if(!items.length)return;
+  if(!confirm('Автоматически разложить '+items.length+' шт. по листу? Положение программ изменится (исходные файлы не трогаются, сдвиг можно сбросить).'))return;
+  items.sort((a,b)=>b.h-a.h);
+  const m=state.margin,gap=8,place=[];let x=m,y=m,rowH=0;
+  for(const it of items){
+    if(x+it.w>sh.w-m&&x>m){x=m;y+=rowH+gap;rowH=0}
+    if(x+it.w>sh.w-m||y+it.h>sh.h-m)return toast('Не помещается: «'+it.fs[0].name+'». Ничего не изменено.');
+    place.push([it,x,y]);x+=it.w+gap;rowH=Math.max(rowH,it.h)}
+  for(const[it,px,py]of place){const dx=px+state.toolD/2-it.bb.x0,dy=py+state.toolD/2-it.bb.y0;
+    for(const f of it.fs){f.off.x=Math.round((f.off.x+dx)*1000)/1000;f.off.y=Math.round((f.off.y+dy)*1000)/1000;analyze(f)}}
+  refresh(false);toast('Разложено. Проверьте предупреждения.')}
+$('#bPack').onclick=packAll;
+$('#bClear').onclick=()=>{if(!state.files.length||!confirm('Убрать все загруженные файлы и шурупы?'))return;
+  state.files=[];state.screws=[];state.sel=null;state.sheet.auto=true;state.rpts=[];try{localStorage.removeItem(LS)}catch(e){}refresh(true)};
+$('#bMove').onclick=e=>{state.moveMode=!state.moveMode;e.currentTarget.classList.toggle('on',state.moveMode);
+  toast(state.moveMode?(state.sel?'Тащите программу пальцем или мышью. Два пальца / колесо — масштаб':'Выберите программу: нажмите на деталь или карточку, потом тащите'):'Перетаскивание листа включено')};
+$('#bRuler').onclick=e=>{state.ruler=!state.ruler;state.rpts=[];e.currentTarget.classList.toggle('on',state.ruler);
+  if(state.ruler){state.screwMode=false;$('#bScrew').classList.remove('on');toast('Линейка: нажмите две точки')}redraw()};
+
+/* ====================== запоминание сессии ====================== */
+const LS='raskroy-v2';let saveT;
+function saveSoon(){clearTimeout(saveT);saveT=setTimeout(saveNow,500)}
+function saveNow(){try{
+  const d={toolD:state.toolD,screwD:state.screwD,screws:state.screws.map(m=>({x:m.x,y:m.y})),sheet:{auto:state.sheet.auto,w:state.sheet.w,h:state.sheet.h},
+    files:state.files.map(f=>({name:f.name,b64:btoa(bytesToStr(f.bytes)),off:f.off,vis:f.visible,color:f.color,grp:state.files.findIndex(x=>x.gid===f.gid)}))};
+  const t=JSON.stringify(d);if(t.length>4e6)return;localStorage.setItem(LS,t)}catch(e){}}
+function restore(){try{
+  const t=localStorage.getItem(LS);if(!t)return;const d=JSON.parse(t);
+  if(d.toolD>0){state.toolD=d.toolD;$('#tool').value=d.toolD}
+  if(d.screwD>0){state.screwD=d.screwD;$('#scD').value=d.screwD}
+  (d.files||[]).forEach(x=>addBytes(x.name,strToBytes(atob(x.b64)),{off:x.off,color:x.color,vis:x.vis,noLink:true}));
+  (d.files||[]).forEach((x,i)=>{if(x.grp>=0&&x.grp<i)state.files[i].gid=state.files[x.grp].gid});
+  state.screws=d.screws||[];
+  if(d.sheet&&!d.sheet.auto&&d.sheet.w>0){state.sheet.auto=false;state.sheet.w=d.sheet.w;state.sheet.h=d.sheet.h}
+  if(state.files.length){refresh(true);toast('Восстановлены файлы прошлой сессии')}
+}catch(e){}}
+
 /* ====================== размер холста ====================== */
 function resize(){dpr=Math.min(3,window.devicePixelRatio||1);const w=cv.clientWidth,h=cv.clientHeight;
   cv.width=Math.max(1,Math.round(w*dpr));cv.height=Math.max(1,Math.round(h*dpr));dirty=false;paint()}
 new ResizeObserver(()=>{const first=!state.moved;resize();if(first)fit()}).observe(cv);
-renderPanel();resize();
+renderPanel();resize();restore();
 </script>
 </body>
 </html>
