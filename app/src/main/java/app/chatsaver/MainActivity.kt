@@ -228,7 +228,8 @@ class MainActivity : Activity() {
         fabs.visibility = View.GONE
         ui.removeCallbacks(watchdog)
         ui.postDelayed(watchdog, 4_000)
-        web.evaluateJavascript(script.replace("__TOKEN__", t), null)
+        val opts = org.json.JSONObject().put("mode", "chat").put("md", true).put("roles", true).put("scroll", true).toString()
+        web.evaluateJavascript(script.replace("__TOKEN__", t).replace("__OPTS__", opts), null)
     }
 
     private fun cancelSave() {
